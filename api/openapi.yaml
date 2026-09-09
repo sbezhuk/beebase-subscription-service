@@ -55,5 +55,5 @@ paths:
                 type: object
                 properties:
                   status: { type: string, example: "ok" }
-                  service: { type: string, example: "beebase-subscription" }
+                  service: { type: string, example: "beebase-subscription-service" }
                   database: { type: string, example: "connected" }

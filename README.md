@@ -1,4 +1,4 @@
-# beebase-subscription
+# beebase-subscription-service
 
 Subscription service for BeeBase with dedicated PostgreSQL storage.
 

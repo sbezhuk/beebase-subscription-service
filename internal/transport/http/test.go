@@ -27,7 +27,7 @@ func TestHandler(db *pgxpool.Pool) http.HandlerFunc {
 		if err := db.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
 			httpx.WriteJSON(w, http.StatusInternalServerError, testResponse{
 				Status:   "error",
-				Service:  "beebase-subscription",
+				Service:  "beebase-subscription-service",
 				Database: "unreachable: " + err.Error(),
 			})
 			return
@@ -35,7 +35,7 @@ func TestHandler(db *pgxpool.Pool) http.HandlerFunc {
 
 		httpx.WriteJSON(w, http.StatusOK, testResponse{
 			Status:   "ok",
-			Service:  "beebase-subscription",
+			Service:  "beebase-subscription-service",
 			Database: "connected",
 		})
 	}

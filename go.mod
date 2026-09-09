@@ -1,4 +1,4 @@
-module github.com/sbezhuk/beebase-subscription
+module github.com/sbezhuk/beebase-subscription-service
 
 go 1.27.0
 

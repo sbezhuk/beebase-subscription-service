@@ -17,7 +17,7 @@ permissions:
 
 env:
   AWS_REGION: eu-central-1
-  ECR_REPOSITORY: beebase-subscription
+  ECR_REPOSITORY: beebase-subscription-service
 
 jobs:
   code-quality-and-tests:

@@ -11,9 +11,9 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"github.com/sbezhuk/beebase-subscription/internal/config"
-	"github.com/sbezhuk/beebase-subscription/internal/platform/postgres"
-	transporthttp "github.com/sbezhuk/beebase-subscription/internal/transport/http"
+	"github.com/sbezhuk/beebase-subscription-service/internal/config"
+	"github.com/sbezhuk/beebase-subscription-service/internal/platform/postgres"
+	transporthttp "github.com/sbezhuk/beebase-subscription-service/internal/transport/http"
 
 	"github.com/sbezhuk/beebase-common/logger"
 	"github.com/sbezhuk/beebase-common/server"
