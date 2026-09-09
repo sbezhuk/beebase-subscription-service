@@ -1,0 +1,59 @@
+openapi: 3.0.3
+info:
+  title: BeeBase Subscription Service API
+  description: Subscription management service for BeeBase.
+  version: 0.1.0
+servers:
+  - url: http://localhost:8080
+
+tags:
+  - name: system
+    description: Liveness and readiness probes.
+  - name: subscription
+    description: Subscription endpoints.
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Process is running
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+
+  /ready:
+    get:
+      tags: [system]
+      summary: Readiness probe
+      responses:
+        "200":
+          description: Service and database are ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+
+  /test:
+    get:
+      tags: [subscription]
+      summary: Subscription test route
+      description: Verifies subscription service and its dedicated database connectivity.
+      responses:
+        "200":
+          description: Test successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+                  service: { type: string, example: "beebase-subscription" }
+                  database: { type: string, example: "connected" }

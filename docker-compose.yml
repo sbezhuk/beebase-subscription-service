@@ -1,0 +1,50 @@
+# Standalone development compose for beebase-subscription.
+# Runs PostgreSQL, applies migrations, and runs the service.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-beebase}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-beebase}
+      POSTGRES_DB: ${POSTGRES_DB:-beebase_subscription}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-beebase} -d ${POSTGRES_DB:-beebase_subscription}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  migrate:
+    image: migrate/migrate:v4.19.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - 'migrate -path=/migrations -database "postgres://${POSTGRES_USER:-beebase}:${POSTGRES_PASSWORD:-beebase}@postgres:5432/${POSTGRES_DB:-beebase_subscription}?sslmode=disable" up'
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: debug
+      HTTP_PORT: "8080"
+      DATABASE_URL: postgres://${POSTGRES_USER:-beebase}:${POSTGRES_PASSWORD:-beebase}@postgres:5432/${POSTGRES_DB:-beebase_subscription}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
