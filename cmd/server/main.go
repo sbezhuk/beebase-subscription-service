@@ -20,10 +20,13 @@ import (
 	"github.com/sbezhuk/beebase-subscription-service/internal/platform/postgres"
 	repopostgres "github.com/sbezhuk/beebase-subscription-service/internal/repository/postgres"
 	transporthttp "github.com/sbezhuk/beebase-subscription-service/internal/transport/http"
+	subhttp "github.com/sbezhuk/beebase-subscription-service/internal/transport/http/subscription"
 	webhookhttp "github.com/sbezhuk/beebase-subscription-service/internal/transport/http/webhook"
 
+	"github.com/sbezhuk/beebase-common/authmw"
 	"github.com/sbezhuk/beebase-common/logger"
 	"github.com/sbezhuk/beebase-common/server"
+	"github.com/sbezhuk/beebase-common/sessionstore"
 )
 
 func main() {
@@ -58,6 +61,23 @@ func run() error {
 
 	log.Info("connected to database")
 
+	redisConnectCtx, cancelRedisConnect := context.WithTimeout(ctx, cfg.RedisConnectTimeout)
+	redisClient, err := sessionstore.NewRedisClient(redisConnectCtx, cfg.RedisAddr)
+	cancelRedisConnect()
+	if err != nil {
+		return fmt.Errorf("connect to redis: %w", err)
+	}
+	defer redisClient.Close()
+
+	log.Info("connected to redis")
+
+	sessions := sessionstore.NewStore(redisClient)
+
+	verifier, err := authmw.NewVerifierFromJWKSURL(ctx, cfg.AuthJWKSURL, sessions)
+	if err != nil {
+		return fmt.Errorf("build JWKS verifier: %w", err)
+	}
+
 	repo := repopostgres.NewSubscriptionRepository(db)
 	appleVerifier := apple.NewDefaultVerifier(nil)
 	expectedEnv := subscription.EnvironmentProduction
@@ -79,7 +99,9 @@ func run() error {
 		googleHandler = webhookhttp.NewGoogleHandler(appService, log)
 	}
 
-	router := transporthttp.NewRouter(log, db, appleHandler, googleHandler)
+	subscriptionHandler := subhttp.NewHandler(appService, log)
+
+	router := transporthttp.NewRouter(log, db, subscriptionHandler, appleHandler, googleHandler, verifier)
 
 	srv := server.New(server.Config{
 		Addr:         ":" + cfg.HTTPPort,

@@ -30,6 +30,9 @@ const (
 	ProductProYearly  = "beebase_pro_yearly"
 )
 
+// googleSubscriptionID is the Google Play subscription product ID for BeeBase Pro.
+const googleSubscriptionID = "beebase_pro"
+
 // Service coordinates subscription domain operations, repository persistence, and store notifications.
 type Service struct {
 	repo        subscription.Repository
@@ -433,7 +436,7 @@ func (s *Service) HandleGoogleNotification(ctx context.Context, payload []byte) 
 		return nil
 	}
 
-	const expectedSubscriptionID = "beebase_pro"
+	const expectedSubscriptionID = googleSubscriptionID
 	if subNotif.SubscriptionID != expectedSubscriptionID {
 		s.log.Warn("ignoring google notification for unsupported subscription product",
 			"messageId", env.Message.MessageID,
@@ -642,4 +645,253 @@ func maskToken(token string) string {
 		return "***"
 	}
 	return token[:4] + "..." + token[len(token)-4:]
+}
+
+// Entitlement values for the subscription API response.
+const (
+	EntitlementFree = "free"
+	EntitlementPro  = "pro"
+)
+
+// VerificationResult is returned by GetSubscription, VerifyApplePurchase,
+// and VerifyGooglePurchase.
+type VerificationResult struct {
+	Subscription *subscription.Subscription
+	Entitlement  string // EntitlementFree or EntitlementPro
+}
+
+// entitlementFor returns the entitlement string for sub.
+// Uses HasActiveAccess as the authoritative source.
+func entitlementFor(sub *subscription.Subscription) string {
+	if sub != nil && sub.HasActiveAccess(time.Now().UTC()) {
+		return EntitlementPro
+	}
+	return EntitlementFree
+}
+
+// GetSubscription returns the current subscription for userID.
+// If no subscription record exists, returns a free-tier VerificationResult
+// with a nil Subscription field (not an error).
+func (s *Service) GetSubscription(ctx context.Context, userID uuid.UUID) (*VerificationResult, error) {
+	sub, err := s.repo.FindByUserID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, subscription.ErrNotFound) {
+			return &VerificationResult{Entitlement: EntitlementFree}, nil
+		}
+		return nil, fmt.Errorf("get subscription: %w", err)
+	}
+	return &VerificationResult{
+		Subscription: sub,
+		Entitlement:  entitlementFor(sub),
+	}, nil
+}
+
+// VerifyApplePurchase verifies a newly completed Apple in-app purchase
+// for the authenticated user using the StoreKit 2 signedTransaction JWS.
+// It upserts the subscription record and returns the resulting state.
+//
+// The authenticated userID always wins over any appAccountToken in the
+// receipt, so a malicious client cannot claim another user's subscription.
+func (s *Service) VerifyApplePurchase(ctx context.Context, userID uuid.UUID, signedTransaction string) (*VerificationResult, error) {
+	if signedTransaction == "" {
+		return nil, fmt.Errorf("%w: empty signedTransaction", ErrInvalidWebhookPayload)
+	}
+
+	txInfo, err := s.verifier.VerifyTransaction(signedTransaction)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidWebhookPayload, err)
+	}
+
+	if txInfo.BundleID != s.bundleID {
+		return nil, fmt.Errorf("%w: bundle id mismatch", ErrBundleIDMismatch)
+	}
+
+	incomingEnv := mapEnvironment(txInfo.Environment)
+	if incomingEnv != s.expectedEnv {
+		s.log.Warn("verify apple: environment mismatch",
+			"incoming_env", incomingEnv,
+			"expected_env", s.expectedEnv,
+			"user_id", userID,
+		)
+		return nil, fmt.Errorf("%w: environment mismatch", ErrInvalidWebhookPayload)
+	}
+
+	if !isSupportedProduct(txInfo.ProductID) {
+		return nil, fmt.Errorf("%w: unsupported product %s", ErrUnsupportedProduct, txInfo.ProductID)
+	}
+
+	var result *VerificationResult
+	err = s.repo.WithTx(ctx, func(txRepo subscription.Repository) error {
+		existing, lookupErr := txRepo.FindByProviderAndTransaction(ctx, subscription.ProviderApple, txInfo.OriginalTransactionID)
+		if lookupErr != nil && !errors.Is(lookupErr, subscription.ErrNotFound) {
+			return fmt.Errorf("lookup subscription: %w", lookupErr)
+		}
+
+		now := time.Now().UTC()
+		env := incomingEnv
+
+		var incomingExpiresAt *time.Time
+		if txInfo.ExpiresDate > 0 {
+			t := time.UnixMilli(txInfo.ExpiresDate).UTC()
+			incomingExpiresAt = &t
+		}
+		autoRenew := true
+
+		var sub *subscription.Subscription
+		if existing != nil {
+			existing.UserID = userID
+			existing.ProductID = txInfo.ProductID
+			existing.TransactionID = &txInfo.TransactionID
+			existing.OriginalTransactionID = &txInfo.OriginalTransactionID
+			existing.Status = subscription.StatusActive
+			existing.Environment = &env
+			existing.ExpiresAt = incomingExpiresAt
+			existing.AutoRenew = &autoRenew
+			existing.CancelledAt = nil
+			existing.UpdatedAt = now
+			if err := txRepo.Upsert(ctx, existing); err != nil {
+				return fmt.Errorf("upsert subscription: %w", err)
+			}
+			sub = existing
+		} else {
+			newSub, newErr := subscription.New(userID, subscription.ProviderApple, txInfo.ProductID)
+			if newErr != nil {
+				return fmt.Errorf("construct subscription: %w", newErr)
+			}
+			newSub.OriginalTransactionID = &txInfo.OriginalTransactionID
+			newSub.TransactionID = &txInfo.TransactionID
+			newSub.Status = subscription.StatusActive
+			newSub.Environment = &env
+			newSub.ExpiresAt = incomingExpiresAt
+			newSub.AutoRenew = &autoRenew
+			newSub.UpdatedAt = now
+			if err := txRepo.Create(ctx, newSub); err != nil {
+				return fmt.Errorf("create subscription: %w", err)
+			}
+			sub = newSub
+		}
+
+		s.log.Info("apple purchase verified",
+			"user_id", userID,
+			"product_id", txInfo.ProductID,
+			"original_transaction_id", txInfo.OriginalTransactionID,
+			"status", sub.Status,
+		)
+
+		result = &VerificationResult{
+			Subscription: sub,
+			Entitlement:  entitlementFor(sub),
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// VerifyGooglePurchase verifies a newly completed Google Play purchase for
+// the authenticated user using the purchase token. It fetches authoritative
+// state from the Google Play Developer API, upserts the subscription, and
+// returns the resulting state and entitlement.
+func (s *Service) VerifyGooglePurchase(ctx context.Context, userID uuid.UUID, purchaseToken, subscriptionID, packageName string) (*VerificationResult, error) {
+	if purchaseToken == "" {
+		return nil, fmt.Errorf("%w: empty purchaseToken", ErrInvalidWebhookPayload)
+	}
+	if subscriptionID == "" {
+		subscriptionID = googleSubscriptionID
+	}
+	if packageName == "" {
+		packageName = s.googlePackageName
+	}
+	if s.googleClient == nil {
+		return nil, errors.New("google client is not configured")
+	}
+
+	googleSub, err := s.googleClient.GetSubscription(ctx, packageName, subscriptionID, purchaseToken)
+	if err != nil {
+		return nil, fmt.Errorf("%w: google api lookup failed", ErrInvalidWebhookPayload)
+	}
+
+	targetStatus, autoRenew := mapGoogleStatus(0, googleSub)
+
+	var incomingExpiresAt *time.Time
+	if !googleSub.ExpiryTime.IsZero() {
+		t := googleSub.ExpiryTime.UTC()
+		incomingExpiresAt = &t
+	}
+
+	var result *VerificationResult
+	err = s.repo.WithTx(ctx, func(txRepo subscription.Repository) error {
+		now := time.Now().UTC()
+		env := subscription.EnvironmentProduction
+		if googleSub.TestPurchase {
+			env = subscription.EnvironmentSandbox
+		}
+
+		productID := googleSub.FullProductID()
+		if productID == "" {
+			productID = subscriptionID
+		}
+
+		existing, lookupErr := txRepo.FindByProviderAndPurchaseToken(ctx, subscription.ProviderGoogle, purchaseToken)
+		if lookupErr != nil && !errors.Is(lookupErr, subscription.ErrNotFound) {
+			return fmt.Errorf("lookup subscription: %w", lookupErr)
+		}
+
+		var sub *subscription.Subscription
+		if existing != nil {
+			existing.UserID = userID
+			existing.ProductID = productID
+			if googleSub.LatestOrderID != "" {
+				existing.TransactionID = &googleSub.LatestOrderID
+			}
+			existing.Status = targetStatus
+			existing.Environment = &env
+			existing.ExpiresAt = incomingExpiresAt
+			existing.AutoRenew = &autoRenew
+			if targetStatus == subscription.StatusActive {
+				existing.CancelledAt = nil
+			}
+			existing.UpdatedAt = now
+			if err := txRepo.Upsert(ctx, existing); err != nil {
+				return fmt.Errorf("upsert subscription: %w", err)
+			}
+			sub = existing
+		} else {
+			newSub, newErr := subscription.New(userID, subscription.ProviderGoogle, productID)
+			if newErr != nil {
+				return fmt.Errorf("construct subscription: %w", newErr)
+			}
+			newSub.PurchaseToken = &purchaseToken
+			if googleSub.LatestOrderID != "" {
+				newSub.TransactionID = &googleSub.LatestOrderID
+			}
+			newSub.Status = targetStatus
+			newSub.Environment = &env
+			newSub.ExpiresAt = incomingExpiresAt
+			newSub.AutoRenew = &autoRenew
+			newSub.UpdatedAt = now
+			if err := txRepo.Create(ctx, newSub); err != nil {
+				return fmt.Errorf("create subscription: %w", err)
+			}
+			sub = newSub
+		}
+
+		s.log.Info("google purchase verified",
+			"user_id", userID,
+			"product_id", productID,
+			"status", sub.Status,
+		)
+
+		result = &VerificationResult{
+			Subscription: sub,
+			Entitlement:  entitlementFor(sub),
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }

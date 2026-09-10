@@ -1,5 +1,4 @@
-// Package http wires the HTTP transport: routing, middleware, and
-// endpoints for the subscription service.
+// Package http wires the HTTP transport for the subscription service.
 package http
 
 import (
@@ -10,10 +9,20 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sbezhuk/beebase-common/authmw"
+	subhttp "github.com/sbezhuk/beebase-subscription-service/internal/transport/http/subscription"
 )
 
 // NewRouter builds the root HTTP handler for the subscription service.
-func NewRouter(log *slog.Logger, db *pgxpool.Pool, appleWebhookHandler http.Handler, googleWebhookHandler http.Handler) http.Handler {
+func NewRouter(
+	log *slog.Logger,
+	db *pgxpool.Pool,
+	subscriptionHandler *subhttp.Handler,
+	appleWebhookHandler http.Handler,
+	googleWebhookHandler http.Handler,
+	tokenParser authmw.AccessTokenParser,
+) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -28,6 +37,14 @@ func NewRouter(log *slog.Logger, db *pgxpool.Pool, appleWebhookHandler http.Hand
 	r.Get("/test", testH)
 	r.Get("/api/v1/subscription/test", testH)
 	r.Get("/api/v1/subscriptions/test", testH)
+
+	// Authenticated subscription endpoints
+	r.Route("/api/v1/subscription", func(r chi.Router) {
+		r.Use(authmw.RequireAuth(tokenParser))
+		r.Get("/", subscriptionHandler.GetSubscription)
+		r.Post("/verify", subscriptionHandler.VerifyPurchase)
+		r.Post("/restore", subscriptionHandler.RestorePurchases)
+	})
 
 	if appleWebhookHandler != nil {
 		r.Method(http.MethodPost, "/api/v1/subscriptions/webhooks/apple", appleWebhookHandler)

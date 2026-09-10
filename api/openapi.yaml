@@ -60,6 +60,79 @@ paths:
                   service: { type: string, example: "beebase-subscription-service" }
                   database: { type: string, example: "connected" }
 
+  /api/v1/subscription:
+    get:
+      tags: [subscription]
+      summary: Get current subscription
+      description: Returns current subscription state and entitlement level ("free" or "pro") for the authenticated user.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Subscription state retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionResponse'
+        "401":
+          description: Missing or invalid authorization token.
+        "500":
+          description: Internal server error.
+
+  /api/v1/subscription/verify:
+    post:
+      tags: [subscription]
+      summary: Server-side purchase verification
+      description: Verifies an in-app purchase proof (StoreKit 2 signedTransaction for Apple, purchaseToken for Google) and syncs user entitlement.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyRequest'
+      responses:
+        "200":
+          description: Purchase verified successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionResponse'
+        "400":
+          description: Validation error or store verification failure.
+        "401":
+          description: Missing or invalid authorization token.
+        "500":
+          description: Internal server error.
+
+  /api/v1/subscription/restore:
+    post:
+      tags: [subscription]
+      summary: Restore purchase
+      description: Restores an existing subscription purchase for the authenticated user.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreRequest'
+      responses:
+        "200":
+          description: Purchase restored successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionResponse'
+        "400":
+          description: Validation error or store verification failure.
+        "401":
+          description: Missing or invalid authorization token.
+        "500":
+          description: Internal server error.
+
   /api/v1/subscriptions/webhooks/apple:
     post:
       tags: [webhooks]
@@ -181,3 +254,108 @@ paths:
                     properties:
                       code: { type: string, example: "internal_error" }
                       message: { type: string, example: "something went wrong" }
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    SubscriptionResponse:
+      type: object
+      required:
+        - entitlement
+      properties:
+        entitlement:
+          type: string
+          enum: [free, pro]
+          example: "pro"
+        subscription:
+          $ref: '#/components/schemas/SubscriptionDetail'
+
+    SubscriptionDetail:
+      type: object
+      required:
+        - id
+        - user_id
+        - provider
+        - product_id
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+          enum: [apple, google]
+          example: "apple"
+        product_id:
+          type: string
+          example: "beebase_pro_monthly"
+        status:
+          type: string
+          enum: [inactive, active, grace_period, billing_retry, expired, cancelled, revoked]
+          example: "active"
+        original_transaction_id:
+          type: string
+        transaction_id:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        auto_renew:
+          type: boolean
+        cancelled_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    VerifyRequest:
+      type: object
+      required:
+        - provider
+      properties:
+        provider:
+          type: string
+          enum: [apple, google]
+        signed_transaction:
+          type: string
+          description: Required for Apple. JWS-encoded transaction from StoreKit 2.
+        purchase_token:
+          type: string
+          description: Required for Google. Purchase token from Google Play Billing.
+        subscription_id:
+          type: string
+          description: Optional Google subscription ID (defaults to beebase_pro).
+        package_name:
+          type: string
+          description: Optional Android package name.
+
+    RestoreRequest:
+      type: object
+      required:
+        - provider
+      properties:
+        provider:
+          type: string
+          enum: [apple, google]
+        signed_transaction:
+          type: string
+        purchase_token:
+          type: string
+        subscription_id:
+          type: string
+        package_name:
+          type: string

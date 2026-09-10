@@ -33,6 +33,12 @@ type Config struct {
 	// Google Play configuration
 	GoogleServiceAccountJSON string
 	GooglePackageName        string
+
+	// AuthJWKSURL points at auth-service's JWKS endpoint for token verification.
+	AuthJWKSURL string
+	// RedisAddr is the shared session store for token revocation.
+	RedisAddr           string
+	RedisConnectTimeout time.Duration
 }
 
 // Load builds a Config from environment variables, falling back to
@@ -71,10 +77,20 @@ func Load() (*Config, error) {
 
 		GoogleServiceAccountJSON: getEnv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
 		GooglePackageName:        getEnv("GOOGLE_PACKAGE_NAME", "com.beebase.production"),
+
+		AuthJWKSURL:         getEnv("AUTH_JWKS_URL", ""),
+		RedisAddr:           getEnv("REDIS_ADDR", ""),
+		RedisConnectTimeout: getDuration("REDIS_CONNECT_TIMEOUT", 5*time.Second),
 	}
 
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: DATABASE_URL is required")
+	}
+	if cfg.AuthJWKSURL == "" {
+		return nil, fmt.Errorf("config: AUTH_JWKS_URL is required")
+	}
+	if cfg.RedisAddr == "" {
+		return nil, fmt.Errorf("config: REDIS_ADDR is required")
 	}
 
 	return cfg, nil
