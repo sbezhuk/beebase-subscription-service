@@ -1,0 +1,645 @@
+// Package subscription implements the application use cases for subscription management
+// and store webhook processing.
+package subscription
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/sbezhuk/beebase-subscription-service/internal/domain/subscription"
+	"github.com/sbezhuk/beebase-subscription-service/internal/platform/apple"
+	"github.com/sbezhuk/beebase-subscription-service/internal/platform/google"
+)
+
+var (
+	ErrInvalidWebhookPayload = errors.New("invalid webhook payload")
+	ErrUnsupportedProduct    = errors.New("unsupported subscription product")
+	ErrBundleIDMismatch      = errors.New("bundle id mismatch")
+)
+
+// Supported BeeBase Pro subscription products.
+const (
+	ProductProMonthly = "beebase_pro_monthly"
+	ProductProYearly  = "beebase_pro_yearly"
+)
+
+// Service coordinates subscription domain operations, repository persistence, and store notifications.
+type Service struct {
+	repo        subscription.Repository
+	verifier    apple.Verifier
+	bundleID    string
+	expectedEnv subscription.Environment
+	log         *slog.Logger
+
+	googleClient      google.Client
+	googlePackageName string
+}
+
+// NewService constructs a Service with the provided repository, verifier, and configuration.
+func NewService(repo subscription.Repository, verifier apple.Verifier, bundleID string, expectedEnv subscription.Environment, log *slog.Logger) *Service {
+	return &Service{
+		repo:        repo,
+		verifier:    verifier,
+		bundleID:    bundleID,
+		expectedEnv: expectedEnv,
+		log:         log,
+	}
+}
+
+// WithGoogle sets the Google Play API client and default Android package name.
+func (s *Service) WithGoogle(client google.Client, packageName string) *Service {
+	s.googleClient = client
+	s.googlePackageName = packageName
+	return s
+}
+
+// HandleAppleNotification processes an incoming App Store Server Notifications V2 payload.
+func (s *Service) HandleAppleNotification(ctx context.Context, signedPayload string) error {
+	if signedPayload == "" {
+		return fmt.Errorf("%w: empty signedPayload", ErrInvalidWebhookPayload)
+	}
+
+	// 1. Cryptographically verify and decode outer notification JWS
+	notification, err := s.verifier.VerifyNotification(signedPayload)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidWebhookPayload, err)
+	}
+
+	if notification.NotificationUUID == "" {
+		return fmt.Errorf("%w: missing notificationUUID", ErrInvalidWebhookPayload)
+	}
+
+	// 2. Cryptographically verify and decode signed transaction information
+	if notification.Data.SignedTransactionInfo == "" {
+		s.log.Info("apple notification missing signedTransactionInfo, skipping transaction update",
+			"notificationUUID", notification.NotificationUUID,
+			"notificationType", notification.NotificationType,
+		)
+		// Still record event for idempotency
+		rawPayload, _ := json.Marshal(notification)
+		event := subscription.NewEvent(subscription.ProviderApple, notification.NotificationUUID, notification.NotificationType, rawPayload)
+		_, _ = s.repo.RecordEventIfNotExists(ctx, event)
+		return nil
+	}
+
+	txInfo, err := s.verifier.VerifyTransaction(notification.Data.SignedTransactionInfo)
+	if err != nil {
+		return fmt.Errorf("%w: verify transaction: %v", ErrInvalidWebhookPayload, err)
+	}
+
+	// 3. Cryptographically verify and decode signed renewal info if present (VER-01: fail closed on error)
+	var renewalInfo *apple.RenewalInfo
+	if notification.Data.SignedRenewalInfo != "" {
+		renewal, err := s.verifier.VerifyRenewalInfo(notification.Data.SignedRenewalInfo)
+		if err != nil {
+			return fmt.Errorf("%w: verify renewal info: %v", ErrInvalidWebhookPayload, err)
+		}
+		renewalInfo = renewal
+	}
+
+	// 4. Product, bundle, and environment validation (ENV-01: fail closed on mismatch)
+	if txInfo.BundleID != s.bundleID {
+		s.log.Warn("ignoring notification for mismatched bundle id",
+			"notificationUUID", notification.NotificationUUID,
+			"got_bundle_id", txInfo.BundleID,
+			"expected_bundle_id", s.bundleID,
+		)
+		return nil
+	}
+
+	incomingEnv := mapEnvironment(txInfo.Environment)
+	if incomingEnv != s.expectedEnv {
+		s.log.Warn("ignoring notification for mismatched environment (ENV-01)",
+			"notificationUUID", notification.NotificationUUID,
+			"incoming_env", incomingEnv,
+			"expected_env", s.expectedEnv,
+		)
+		return nil
+	}
+
+	if !isSupportedProduct(txInfo.ProductID) {
+		s.log.Warn("ignoring notification for unsupported product id",
+			"notificationUUID", notification.NotificationUUID,
+			"product_id", txInfo.ProductID,
+		)
+		return nil
+	}
+
+	// 5. Map Apple notification type + subtype + renewal info to domain Status
+	targetStatus, autoRenew, shouldProcess := mapAppleStatus(notification.NotificationType, notification.Subtype, renewalInfo)
+	if !shouldProcess {
+		s.log.Info("unhandled or informational apple notification type, skipping subscription update",
+			"notificationUUID", notification.NotificationUUID,
+			"notificationType", notification.NotificationType,
+			"subtype", notification.Subtype,
+		)
+		// Record event for idempotency & audit
+		rawPayload, _ := json.Marshal(notification)
+		event := subscription.NewEvent(subscription.ProviderApple, notification.NotificationUUID, notification.NotificationType, rawPayload)
+		_, _ = s.repo.RecordEventIfNotExists(ctx, event)
+		return nil
+	}
+
+	// 6. Execute idempotency and subscription state update within a single database transaction
+	return s.repo.WithTx(ctx, func(txRepo subscription.Repository) error {
+		rawPayload, _ := json.Marshal(notification)
+		event := subscription.NewEvent(subscription.ProviderApple, notification.NotificationUUID, notification.NotificationType, rawPayload)
+
+		inserted, err := txRepo.RecordEventIfNotExists(ctx, event)
+		if err != nil {
+			return fmt.Errorf("record event idempotency: %w", err)
+		}
+		if !inserted {
+			s.log.Info("apple notification already processed, skipping mutation",
+				"notificationUUID", notification.NotificationUUID,
+			)
+			return nil
+		}
+
+		// 7. Resolve user: appAccountToken -> existing subscription by originalTransactionId
+		var (
+			userID      uuid.UUID
+			existingSub *subscription.Subscription
+		)
+
+		if txInfo.AppAccountToken != "" {
+			if parsed, err := uuid.Parse(txInfo.AppAccountToken); err == nil && parsed != uuid.Nil {
+				userID = parsed
+			}
+		}
+
+		// Look up existing subscription by provider + original_transaction_id
+		existing, err := txRepo.FindByProviderAndTransaction(ctx, subscription.ProviderApple, txInfo.OriginalTransactionID)
+		if err == nil {
+			existingSub = existing
+			if userID == uuid.Nil {
+				userID = existing.UserID
+			}
+		} else if !errors.Is(err, subscription.ErrNotFound) {
+			return fmt.Errorf("lookup existing subscription: %w", err)
+		}
+
+		// If user cannot be resolved, do not invent a fake user.
+		if userID == uuid.Nil {
+			s.log.Info("unresolved apple subscription event (no user mapping available yet)",
+				"notificationUUID", notification.NotificationUUID,
+				"notificationType", notification.NotificationType,
+				"originalTransactionId", txInfo.OriginalTransactionID,
+				"productId", txInfo.ProductID,
+			)
+			return nil
+		}
+
+		var incomingExpiresAt *time.Time
+		if txInfo.ExpiresDate > 0 {
+			t := time.UnixMilli(txInfo.ExpiresDate).UTC()
+			incomingExpiresAt = &t
+		}
+
+		var incomingEventAt *time.Time
+		if notification.SignedDate > 0 {
+			t := time.UnixMilli(notification.SignedDate).UTC()
+			incomingEventAt = &t
+		} else if txInfo.SignedDate > 0 {
+			t := time.UnixMilli(txInfo.SignedDate).UTC()
+			incomingEventAt = &t
+		}
+
+		// 8. Out-of-order check (ORD-01: compare signedDate / incomingEventAt)
+		if existingSub != nil && !shouldApplyUpdate(existingSub, targetStatus, incomingExpiresAt, incomingEventAt) {
+			s.log.Info("skipping out-of-order or invalid apple state update",
+				"notificationUUID", notification.NotificationUUID,
+				"currentStatus", existingSub.Status,
+				"targetStatus", targetStatus,
+			)
+			return nil
+		}
+
+		now := time.Now().UTC()
+		env := incomingEnv
+
+		if existingSub != nil {
+			existingSub.ProductID = txInfo.ProductID
+			existingSub.OriginalTransactionID = &txInfo.OriginalTransactionID
+			existingSub.TransactionID = &txInfo.TransactionID
+			existingSub.Status = targetStatus
+			existingSub.Environment = &env
+			existingSub.ExpiresAt = incomingExpiresAt
+			existingSub.AutoRenew = &autoRenew
+			if incomingEventAt != nil {
+				existingSub.LastEventAt = incomingEventAt
+			}
+
+			if targetStatus == subscription.StatusCancelled {
+				if existingSub.CancelledAt == nil {
+					existingSub.CancelledAt = &now
+				}
+			} else if targetStatus == subscription.StatusActive {
+				existingSub.CancelledAt = nil
+			}
+
+			existingSub.UpdatedAt = now
+
+			if err := txRepo.Update(ctx, existingSub); err != nil {
+				return fmt.Errorf("update subscription: %w", err)
+			}
+
+			s.log.Info("updated apple subscription",
+				"subscription_id", existingSub.ID,
+				"user_id", existingSub.UserID,
+				"status", existingSub.Status,
+				"notification_type", notification.NotificationType,
+			)
+		} else {
+			newSub, err := subscription.New(userID, subscription.ProviderApple, txInfo.ProductID)
+			if err != nil {
+				return fmt.Errorf("construct subscription: %w", err)
+			}
+			newSub.OriginalTransactionID = &txInfo.OriginalTransactionID
+			newSub.TransactionID = &txInfo.TransactionID
+			newSub.Status = targetStatus
+			newSub.Environment = &env
+			newSub.ExpiresAt = incomingExpiresAt
+			newSub.AutoRenew = &autoRenew
+			if incomingEventAt != nil {
+				newSub.LastEventAt = incomingEventAt
+			}
+
+			if targetStatus == subscription.StatusCancelled {
+				newSub.CancelledAt = &now
+			}
+
+			newSub.UpdatedAt = now
+
+			if err := txRepo.Create(ctx, newSub); err != nil {
+				return fmt.Errorf("create subscription: %w", err)
+			}
+
+			s.log.Info("created apple subscription from webhook",
+				"subscription_id", newSub.ID,
+				"user_id", newSub.UserID,
+				"status", newSub.Status,
+				"notification_type", notification.NotificationType,
+			)
+		}
+
+		return nil
+	})
+}
+
+func isSupportedProduct(productID string) bool {
+	return productID == ProductProMonthly || productID == ProductProYearly
+}
+
+func mapEnvironment(raw string) subscription.Environment {
+	lower := strings.ToLower(raw)
+	if lower == "production" {
+		return subscription.EnvironmentProduction
+	}
+	return subscription.EnvironmentSandbox
+}
+
+// mapAppleStatus translates Apple NotificationType + Subtype + RenewalInfo into domain Status.
+func mapAppleStatus(notificationType, subtype string, renewal *apple.RenewalInfo) (status subscription.Status, autoRenew bool, ok bool) {
+	switch notificationType {
+	case apple.NotificationTypeSubscribed:
+		return subscription.StatusActive, true, true
+
+	case apple.NotificationTypeDidRenew:
+		return subscription.StatusActive, true, true
+
+	case apple.NotificationTypeDidChangeRenewalStatus:
+		if subtype == apple.SubtypeAutoRenewDisabled || (renewal != nil && renewal.AutoRenewStatus == 0) {
+			return subscription.StatusCancelled, false, true
+		}
+		if subtype == apple.SubtypeAutoRenewEnabled || (renewal != nil && renewal.AutoRenewStatus == 1) {
+			return subscription.StatusActive, true, true
+		}
+		// SEM-01: Fail closed on unknown renewal status subtype without mutating state.
+		return "", false, false
+
+	case apple.NotificationTypeDidFailToRenew:
+		// If Apple indicates grace period, grant grace_period status
+		if subtype == apple.SubtypeGracePeriod || (renewal != nil && renewal.GracePeriodExpiresDate > time.Now().UnixMilli()) {
+			return subscription.StatusGracePeriod, false, true
+		}
+		return subscription.StatusBillingRetry, false, true
+
+	case apple.NotificationTypeGracePeriodExpired:
+		return subscription.StatusExpired, false, true
+
+	case apple.NotificationTypeExpired:
+		return subscription.StatusExpired, false, true
+
+	case apple.NotificationTypeRefund, apple.NotificationTypeRevoke:
+		return subscription.StatusRevoked, false, true
+
+	default:
+		// Unknown or informational types (CONSUMPTION_REQUEST, TEST, etc.)
+		return "", false, false
+	}
+}
+
+// shouldApplyUpdate verifies that an incoming event is not strictly older than the current state
+// and that the state transition is permissible.
+func shouldApplyUpdate(existing *subscription.Subscription, incomingStatus subscription.Status, incomingExpiresAt *time.Time, incomingEventAt *time.Time) bool {
+	if existing == nil {
+		return true
+	}
+
+	// Revoked is a terminal state for this transaction
+	if existing.Status == subscription.StatusRevoked {
+		return false
+	}
+
+	// ORD-01: Out-of-order event timestamp check.
+	// If existing subscription has a LastEventAt timestamp, reject events with a strictly older signedDate.
+	if existing.LastEventAt != nil && incomingEventAt != nil {
+		if incomingEventAt.Before(*existing.LastEventAt) {
+			return false
+		}
+	}
+
+	// If existing subscription has an expiration date, and the incoming event has an older
+	// expiration date, reject the downgrade (older out-of-order event).
+	// Exception: StatusRevoked legitimately terminates access immediately and can have an earlier expiry date.
+	if incomingStatus != subscription.StatusRevoked && existing.ExpiresAt != nil && incomingExpiresAt != nil {
+		if incomingExpiresAt.Before(*existing.ExpiresAt) {
+			return false
+		}
+	}
+
+	// Validate transition rules
+	if !subscription.CanTransition(existing.Status, incomingStatus) {
+		return false
+	}
+
+	return true
+}
+
+// HandleGoogleNotification processes an incoming Google Cloud Pub/Sub push message containing an RTDN event.
+func (s *Service) HandleGoogleNotification(ctx context.Context, payload []byte) error {
+	if len(payload) == 0 {
+		return fmt.Errorf("%w: empty payload", ErrInvalidWebhookPayload)
+	}
+
+	// 1. Parse and decode the Pub/Sub push envelope and inner RTDN payload
+	env, notif, err := google.ParsePubSubNotification(payload)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidWebhookPayload, err)
+	}
+
+	// 2. Handle Google Play Console test notifications
+	if notif.TestNotification != nil {
+		s.log.Info("received google play test notification",
+			"messageId", env.Message.MessageID,
+			"packageName", notif.PackageName,
+		)
+		event := subscription.NewEvent(subscription.ProviderGoogle, env.Message.MessageID, "TEST_NOTIFICATION", payload)
+		_, _ = s.repo.RecordEventIfNotExists(ctx, event)
+		return nil
+	}
+
+	// 3. Ensure this is a subscription notification
+	subNotif := notif.SubscriptionNotification
+	if subNotif == nil {
+		s.log.Info("ignoring non-subscription google play notification",
+			"messageId", env.Message.MessageID,
+			"packageName", notif.PackageName,
+		)
+		event := subscription.NewEvent(subscription.ProviderGoogle, env.Message.MessageID, "NON_SUBSCRIPTION", payload)
+		_, _ = s.repo.RecordEventIfNotExists(ctx, event)
+		return nil
+	}
+
+	// 4. Validate package name and subscription product ID
+	expectedPackage := s.googlePackageName
+	if expectedPackage == "" {
+		expectedPackage = "com.beebase.production"
+	}
+	if notif.PackageName != expectedPackage {
+		s.log.Warn("ignoring google notification for mismatched package name",
+			"messageId", env.Message.MessageID,
+			"got_package_name", notif.PackageName,
+			"expected_package_name", expectedPackage,
+		)
+		return nil
+	}
+
+	const expectedSubscriptionID = "beebase_pro"
+	if subNotif.SubscriptionID != expectedSubscriptionID {
+		s.log.Warn("ignoring google notification for unsupported subscription product",
+			"messageId", env.Message.MessageID,
+			"got_subscription_id", subNotif.SubscriptionID,
+			"expected_subscription_id", expectedSubscriptionID,
+		)
+		return nil
+	}
+
+	if subNotif.PurchaseToken == "" {
+		return fmt.Errorf("%w: missing purchase token", ErrInvalidWebhookPayload)
+	}
+
+	// 5. Use Google Play Developer API as the authoritative source of subscription state
+	if s.googleClient == nil {
+		return errors.New("google client is not configured")
+	}
+
+	googleSub, err := s.googleClient.GetSubscription(ctx, notif.PackageName, subNotif.SubscriptionID, subNotif.PurchaseToken)
+	if err != nil {
+		if errors.Is(err, google.ErrSubscriptionNotFound) {
+			s.log.Warn("google subscription not found upstream",
+				"messageId", env.Message.MessageID,
+				"subscriptionId", subNotif.SubscriptionID,
+				"purchaseToken", maskToken(subNotif.PurchaseToken),
+			)
+			// Record event to prevent infinite duplicate retries
+			event := subscription.NewEvent(subscription.ProviderGoogle, env.Message.MessageID, fmt.Sprintf("TYPE_%d", subNotif.NotificationType), payload)
+			_, _ = s.repo.RecordEventIfNotExists(ctx, event)
+			return nil
+		}
+		return fmt.Errorf("google api lookup: %w", err)
+	}
+
+	// 6. Map Google state to domain Status
+	targetStatus, autoRenew := mapGoogleStatus(subNotif.NotificationType, googleSub)
+
+	var incomingExpiresAt *time.Time
+	if !googleSub.ExpiryTime.IsZero() {
+		t := googleSub.ExpiryTime.UTC()
+		incomingExpiresAt = &t
+	}
+
+	var incomingEventAt *time.Time
+	if notif.EventTimeMillis > 0 {
+		t := notif.EventTimeMillis.Time()
+		incomingEventAt = &t
+	} else if env.Message.PublishTime != "" {
+		if pt, err := time.Parse(time.RFC3339Nano, env.Message.PublishTime); err == nil {
+			utc := pt.UTC()
+			incomingEventAt = &utc
+		} else if pt, err := time.Parse(time.RFC3339, env.Message.PublishTime); err == nil {
+			utc := pt.UTC()
+			incomingEventAt = &utc
+		}
+	}
+
+	// 7. Atomic transaction: idempotency check + subscription mutation
+	return s.repo.WithTx(ctx, func(txRepo subscription.Repository) error {
+		eventType := fmt.Sprintf("NOTIFICATION_TYPE_%d", subNotif.NotificationType)
+		event := subscription.NewEvent(subscription.ProviderGoogle, env.Message.MessageID, eventType, payload)
+
+		inserted, err := txRepo.RecordEventIfNotExists(ctx, event)
+		if err != nil {
+			return fmt.Errorf("record event idempotency: %w", err)
+		}
+		if !inserted {
+			s.log.Info("google notification already processed, skipping mutation",
+				"messageId", env.Message.MessageID,
+			)
+			return nil
+		}
+
+		// Look up existing subscription by provider + purchase_token
+		existingSub, err := txRepo.FindByProviderAndPurchaseToken(ctx, subscription.ProviderGoogle, subNotif.PurchaseToken)
+		if errors.Is(err, subscription.ErrNotFound) {
+			s.log.Info("unresolved google subscription event (no user mapping for purchase token)",
+				"messageId", env.Message.MessageID,
+				"notificationType", subNotif.NotificationType,
+				"purchaseToken", maskToken(subNotif.PurchaseToken),
+			)
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("lookup existing subscription: %w", err)
+		}
+
+		// 8. Out-of-order check and state transition validation
+		if !shouldApplyUpdate(existingSub, targetStatus, incomingExpiresAt, incomingEventAt) {
+			s.log.Info("skipping out-of-order or invalid google state update",
+				"messageId", env.Message.MessageID,
+				"currentStatus", existingSub.Status,
+				"targetStatus", targetStatus,
+			)
+			return nil
+		}
+
+		now := time.Now().UTC()
+		env := subscription.EnvironmentProduction
+		if googleSub.TestPurchase {
+			env = subscription.EnvironmentSandbox
+		}
+
+		productID := googleSub.FullProductID()
+		if productID != "" {
+			existingSub.ProductID = productID
+		}
+		if googleSub.LatestOrderID != "" {
+			existingSub.TransactionID = &googleSub.LatestOrderID
+		}
+		existingSub.Status = targetStatus
+		existingSub.Environment = &env
+		existingSub.ExpiresAt = incomingExpiresAt
+		existingSub.AutoRenew = &autoRenew
+		if incomingEventAt != nil {
+			existingSub.LastEventAt = incomingEventAt
+		}
+
+		if targetStatus == subscription.StatusCancelled {
+			if googleSub.CancelledAt != nil {
+				existingSub.CancelledAt = googleSub.CancelledAt
+			} else if existingSub.CancelledAt == nil {
+				existingSub.CancelledAt = &now
+			}
+		} else if targetStatus == subscription.StatusActive {
+			existingSub.CancelledAt = nil
+		}
+
+		existingSub.UpdatedAt = now
+
+		if err := txRepo.Update(ctx, existingSub); err != nil {
+			return fmt.Errorf("update subscription: %w", err)
+		}
+
+		s.log.Info("updated google subscription",
+			"subscription_id", existingSub.ID,
+			"user_id", existingSub.UserID,
+			"status", existingSub.Status,
+			"notification_type", subNotif.NotificationType,
+		)
+
+		return nil
+	})
+}
+
+// mapGoogleStatus maps Google Play notification types and API subscription state to domain Status.
+func mapGoogleStatus(notificationType int, sub *google.Subscription) (subscription.Status, bool) {
+	// Revocation from notification type or developer cancellation takes precedence
+	if notificationType == google.NotificationTypeSubscriptionRevoked ||
+		sub.CancellationReason == google.CancellationReasonDeveloperInitiated {
+		return subscription.StatusRevoked, false
+	}
+
+	switch sub.State {
+	case google.SubscriptionStateActive:
+		if !sub.AutoRenewing {
+			return subscription.StatusCancelled, false
+		}
+		return subscription.StatusActive, true
+
+	case google.SubscriptionStateInGracePeriod:
+		return subscription.StatusGracePeriod, sub.AutoRenewing
+
+	case google.SubscriptionStateOnHold:
+		return subscription.StatusBillingRetry, false
+
+	case google.SubscriptionStateCanceled:
+		if !sub.ExpiryTime.IsZero() && sub.ExpiryTime.Before(time.Now().UTC()) {
+			return subscription.StatusExpired, false
+		}
+		return subscription.StatusCancelled, false
+
+	case google.SubscriptionStateExpired:
+		return subscription.StatusExpired, false
+
+	case google.SubscriptionStatePaused:
+		return subscription.StatusBillingRetry, false
+
+	default:
+		// Fallback based on notification type if state is unspecified
+		switch notificationType {
+		case google.NotificationTypeSubscriptionRecovered,
+			google.NotificationTypeSubscriptionRenewed,
+			google.NotificationTypeSubscriptionPurchased,
+			google.NotificationTypeSubscriptionRestarted:
+			return subscription.StatusActive, true
+		case google.NotificationTypeSubscriptionInGracePeriod:
+			return subscription.StatusGracePeriod, false
+		case google.NotificationTypeSubscriptionOnHold:
+			return subscription.StatusBillingRetry, false
+		case google.NotificationTypeSubscriptionCanceled:
+			return subscription.StatusCancelled, false
+		case google.NotificationTypeSubscriptionExpired:
+			return subscription.StatusExpired, false
+		case google.NotificationTypeSubscriptionRevoked:
+			return subscription.StatusRevoked, false
+		default:
+			return subscription.StatusActive, sub.AutoRenewing
+		}
+	}
+}
+
+// maskToken masks a purchase token for safe logging without exposing credentials or full tokens.
+func maskToken(token string) string {
+	if len(token) <= 8 {
+		return "***"
+	}
+	return token[:4] + "..." + token[len(token)-4:]
+}

@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: BeeBase Subscription Service API
   description: Subscription management service for BeeBase.
-  version: 0.1.0
+  version: 0.2.0
 servers:
   - url: http://localhost:8080
 
@@ -11,6 +11,8 @@ tags:
     description: Liveness and readiness probes.
   - name: subscription
     description: Subscription endpoints.
+  - name: webhooks
+    description: Store notification webhook endpoints.
 
 paths:
   /health:
@@ -57,3 +59,125 @@ paths:
                   status: { type: string, example: "ok" }
                   service: { type: string, example: "beebase-subscription-service" }
                   database: { type: string, example: "connected" }
+
+  /api/v1/subscriptions/webhooks/apple:
+    post:
+      tags: [webhooks]
+      summary: Apple App Store Server Notifications V2
+      description: Receives and processes JWS-signed notification events from the Apple App Store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - signedPayload
+              properties:
+                signedPayload:
+                  type: string
+                  description: JWS-compact encoded App Store Server Notifications V2 payload.
+                  example: "eyJhbGciOiJFUzI1NiIsIng1YyI6WyJ...\""
+      responses:
+        "200":
+          description: Notification acknowledged or processed successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+        "400":
+          description: Invalid request body or invalid signed payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code: { type: string, example: "invalid_notification" }
+                      message: { type: string, example: "invalid webhook payload" }
+        "500":
+          description: Internal processing or database error.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code: { type: string, example: "internal_error" }
+                      message: { type: string, example: "something went wrong" }
+
+  /api/v1/subscriptions/webhooks/google:
+    post:
+      tags: [webhooks]
+      summary: Google Play Real-Time Developer Notifications (RTDN)
+      description: Receives and processes Google Cloud Pub/Sub push messages containing Google Play subscription RTDN events.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - message
+              properties:
+                message:
+                  type: object
+                  required:
+                    - data
+                    - messageId
+                  properties:
+                    data:
+                      type: string
+                      description: Base64-encoded Google Play DeveloperNotification JSON payload.
+                      example: "eyJ2ZXJzaW9uIjoiMS4wIiwicGFja2FnZU5hbWUiOiJjb20uYmVlYmFzZS5wcm9kdWN0aW9uIi...=="
+                    messageId:
+                      type: string
+                      description: Unique Pub/Sub message identifier used for event idempotency.
+                      example: "2070443601311540"
+                    publishTime:
+                      type: string
+                      description: RFC3339 timestamp when message was published.
+                      example: "2026-09-10T08:00:00.000Z"
+                subscription:
+                  type: string
+                  description: Pub/Sub subscription name.
+                  example: "projects/beebase-production/subscriptions/play-rtdn-sub"
+      responses:
+        "200":
+          description: Notification acknowledged or processed successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+        "400":
+          description: Invalid request body, malformed envelope, or invalid base64 data.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code: { type: string, example: "invalid_notification" }
+                      message: { type: string, example: "invalid webhook payload" }
+        "500":
+          description: Internal processing, database, or Google API error.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code: { type: string, example: "internal_error" }
+                      message: { type: string, example: "something went wrong" }

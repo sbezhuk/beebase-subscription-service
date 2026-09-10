@@ -7,13 +7,20 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/joho/godotenv"
 
+	appsub "github.com/sbezhuk/beebase-subscription-service/internal/application/subscription"
 	"github.com/sbezhuk/beebase-subscription-service/internal/config"
+	"github.com/sbezhuk/beebase-subscription-service/internal/domain/subscription"
+	"github.com/sbezhuk/beebase-subscription-service/internal/platform/apple"
+	"github.com/sbezhuk/beebase-subscription-service/internal/platform/google"
 	"github.com/sbezhuk/beebase-subscription-service/internal/platform/postgres"
+	repopostgres "github.com/sbezhuk/beebase-subscription-service/internal/repository/postgres"
 	transporthttp "github.com/sbezhuk/beebase-subscription-service/internal/transport/http"
+	webhookhttp "github.com/sbezhuk/beebase-subscription-service/internal/transport/http/webhook"
 
 	"github.com/sbezhuk/beebase-common/logger"
 	"github.com/sbezhuk/beebase-common/server"
@@ -51,7 +58,28 @@ func run() error {
 
 	log.Info("connected to database")
 
-	router := transporthttp.NewRouter(log, db)
+	repo := repopostgres.NewSubscriptionRepository(db)
+	appleVerifier := apple.NewDefaultVerifier(nil)
+	expectedEnv := subscription.EnvironmentProduction
+	if strings.EqualFold(cfg.AppleEnvironment, "sandbox") {
+		expectedEnv = subscription.EnvironmentSandbox
+	}
+	appService := appsub.NewService(repo, appleVerifier, cfg.AppleBundleID, expectedEnv, log)
+	appleHandler := webhookhttp.NewAppleHandler(appService, log)
+
+	var googleHandler *webhookhttp.GoogleHandler
+	googleClient, err := google.NewClient(ctx, google.Config{
+		ServiceAccountJSON: cfg.GoogleServiceAccountJSON,
+		PackageName:        cfg.GooglePackageName,
+	})
+	if err != nil {
+		log.Warn("could not initialize google client, google webhook disabled", "error", err)
+	} else {
+		appService.WithGoogle(googleClient, cfg.GooglePackageName)
+		googleHandler = webhookhttp.NewGoogleHandler(appService, log)
+	}
+
+	router := transporthttp.NewRouter(log, db, appleHandler, googleHandler)
 
 	srv := server.New(server.Config{
 		Addr:         ":" + cfg.HTTPPort,

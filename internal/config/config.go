@@ -22,13 +22,35 @@ type Config struct {
 
 	DatabaseURL            string
 	DatabaseConnectTimeout time.Duration
+
+	// Apple App Store configuration
+	AppleBundleID    string
+	AppleKeyID       string
+	AppleIssuerID    string
+	ApplePrivateKey  string
+	AppleEnvironment string // "Sandbox" or "Production"
+
+	// Google Play configuration
+	GoogleServiceAccountJSON string
+	GooglePackageName        string
 }
 
 // Load builds a Config from environment variables, falling back to
 // defaults suitable for local development where a variable is unset.
 func Load() (*Config, error) {
+	env := getEnv("APP_ENV", "development")
+
+	appleEnv := getEnv("APPLE_ENVIRONMENT", "")
+	if appleEnv == "" {
+		if env == "production" {
+			appleEnv = "Production"
+		} else {
+			appleEnv = "Sandbox"
+		}
+	}
+
 	cfg := &Config{
-		Env: getEnv("APP_ENV", "development"),
+		Env: env,
 
 		HTTPPort:            getEnv("HTTP_PORT", "8080"),
 		HTTPReadTimeout:     getDuration("HTTP_READ_TIMEOUT", 5*time.Second),
@@ -40,6 +62,15 @@ func Load() (*Config, error) {
 
 		DatabaseURL:            getEnv("DATABASE_URL", ""),
 		DatabaseConnectTimeout: getDuration("DATABASE_CONNECT_TIMEOUT", 10*time.Second),
+
+		AppleBundleID:    getEnv("APPLE_BUNDLE_ID", "com.beebase.production"),
+		AppleKeyID:       getEnv("APPLE_KEY_ID", ""),
+		AppleIssuerID:    getEnv("APPLE_ISSUER_ID", ""),
+		ApplePrivateKey:  getEnv("APPLE_PRIVATE_KEY", ""),
+		AppleEnvironment: appleEnv,
+
+		GoogleServiceAccountJSON: getEnv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
+		GooglePackageName:        getEnv("GOOGLE_PACKAGE_NAME", "com.beebase.production"),
 	}
 
 	if cfg.DatabaseURL == "" {

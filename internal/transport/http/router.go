@@ -13,7 +13,7 @@ import (
 )
 
 // NewRouter builds the root HTTP handler for the subscription service.
-func NewRouter(log *slog.Logger, db *pgxpool.Pool) http.Handler {
+func NewRouter(log *slog.Logger, db *pgxpool.Pool, appleWebhookHandler http.Handler, googleWebhookHandler http.Handler) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -28,6 +28,16 @@ func NewRouter(log *slog.Logger, db *pgxpool.Pool) http.Handler {
 	r.Get("/test", testH)
 	r.Get("/api/v1/subscription/test", testH)
 	r.Get("/api/v1/subscriptions/test", testH)
+
+	if appleWebhookHandler != nil {
+		r.Method(http.MethodPost, "/api/v1/subscriptions/webhooks/apple", appleWebhookHandler)
+		r.Method(http.MethodPost, "/api/v1/subscription/webhooks/apple", appleWebhookHandler)
+	}
+
+	if googleWebhookHandler != nil {
+		r.Method(http.MethodPost, "/api/v1/subscriptions/webhooks/google", googleWebhookHandler)
+		r.Method(http.MethodPost, "/api/v1/subscription/webhooks/google", googleWebhookHandler)
+	}
 
 	return r
 }
