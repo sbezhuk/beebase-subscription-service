@@ -43,23 +43,6 @@ paths:
                 properties:
                   status: { type: string, example: "ok" }
 
-  /test:
-    get:
-      tags: [subscription]
-      summary: Subscription test route
-      description: Verifies subscription service and its dedicated database connectivity.
-      responses:
-        "200":
-          description: Test successful
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status: { type: string, example: "ok" }
-                  service: { type: string, example: "beebase-subscription-service" }
-                  database: { type: string, example: "connected" }
-
   /api/v1/subscription:
     get:
       tags: [subscription]

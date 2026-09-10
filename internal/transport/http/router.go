@@ -33,11 +33,6 @@ func NewRouter(
 	r.Get("/health", HealthHandler)
 	r.Get("/ready", ReadyHandler(db))
 
-	testH := TestHandler(db)
-	r.Get("/test", testH)
-	r.Get("/api/v1/subscription/test", testH)
-	r.Get("/api/v1/subscriptions/test", testH)
-
 	// Authenticated subscription endpoints
 	r.Route("/api/v1/subscription", func(r chi.Router) {
 		r.Use(authmw.RequireAuth(tokenParser))
