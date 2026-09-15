@@ -362,7 +362,7 @@ func TestVerifyPurchase_Apple_Valid_ReturnsPro(t *testing.T) {
 	parser := &stubParser{userID: userID}
 	router := buildRouter(newSvc(repo, verifier), parser)
 
-	body := map[string]string{"provider": "apple", "signed_transaction": "valid-jwt"}
+	body := map[string]string{"provider": "apple", "signedTransaction": "valid-jwt"}
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/subscription/verify", body, "tok")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := decodeResp(t, rec)
@@ -389,7 +389,7 @@ func TestVerifyPurchase_Google_Valid_ReturnsPro(t *testing.T) {
 	svc := newSvc(repo, &mockAppleVerifier{}).WithGoogle(gClient, "com.beebase.production")
 	router := buildRouter(svc, parser)
 
-	body := map[string]string{"provider": "google", "purchase_token": "google-tok-abc"}
+	body := map[string]string{"provider": "google", "purchaseToken": "google-tok-abc"}
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/subscription/verify", body, "tok")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := decodeResp(t, rec)
@@ -401,7 +401,7 @@ func TestVerifyPurchase_MissingProvider_Returns400(t *testing.T) {
 	parser := &stubParser{userID: uuid.New()}
 	router := buildRouter(newSvc(newFakeRepo(), &mockAppleVerifier{}), parser)
 
-	body := map[string]string{"signed_transaction": "something"}
+	body := map[string]string{"signedTransaction": "something"}
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/subscription/verify", body, "tok")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
@@ -428,7 +428,7 @@ func TestVerifyPurchase_UnsupportedProvider_Returns400(t *testing.T) {
 	parser := &stubParser{userID: uuid.New()}
 	router := buildRouter(newSvc(newFakeRepo(), &mockAppleVerifier{}), parser)
 
-	body := map[string]string{"provider": "stripe", "signed_transaction": "x"}
+	body := map[string]string{"provider": "stripe", "signedTransaction": "x"}
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/subscription/verify", body, "tok")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), "unsupported_provider")
@@ -443,7 +443,7 @@ func TestVerifyPurchase_Apple_VerificationFailure_Returns400(t *testing.T) {
 	parser := &stubParser{userID: uuid.New()}
 	router := buildRouter(newSvc(newFakeRepo(), verifier), parser)
 
-	body := map[string]string{"provider": "apple", "signed_transaction": "bad-jwt"}
+	body := map[string]string{"provider": "apple", "signedTransaction": "bad-jwt"}
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/subscription/verify", body, "tok")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), "verification_failed")
@@ -467,7 +467,7 @@ func TestVerifyPurchase_Idempotent(t *testing.T) {
 
 	parser := &stubParser{userID: userID}
 	router := buildRouter(newSvc(repo, verifier), parser)
-	body := map[string]string{"provider": "apple", "signed_transaction": "valid-tx"}
+	body := map[string]string{"provider": "apple", "signedTransaction": "valid-tx"}
 
 	rec1 := doJSON(t, router, http.MethodPost, "/api/v1/subscription/verify", body, "tok")
 	require.Equal(t, http.StatusOK, rec1.Code)
@@ -492,7 +492,7 @@ func TestVerifyPurchase_UnsupportedProduct_Returns400(t *testing.T) {
 	parser := &stubParser{userID: uuid.New()}
 	router := buildRouter(newSvc(newFakeRepo(), verifier), parser)
 
-	body := map[string]string{"provider": "apple", "signed_transaction": "some-tx"}
+	body := map[string]string{"provider": "apple", "signedTransaction": "some-tx"}
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/subscription/verify", body, "tok")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
@@ -501,7 +501,7 @@ func TestVerifyPurchase_Unauthenticated_Returns401(t *testing.T) {
 	parser := &stubParser{err: authmw.ErrInvalidToken}
 	router := buildRouter(newSvc(newFakeRepo(), &mockAppleVerifier{}), parser)
 
-	body := map[string]string{"provider": "apple", "signed_transaction": "x"}
+	body := map[string]string{"provider": "apple", "signedTransaction": "x"}
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/subscription/verify", body, "tok")
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
@@ -526,7 +526,7 @@ func TestRestorePurchases_Apple_Valid_ReturnsPro(t *testing.T) {
 	parser := &stubParser{userID: userID}
 	router := buildRouter(newSvc(repo, verifier), parser)
 
-	body := map[string]string{"provider": "apple", "signed_transaction": "restore-signed-tx"}
+	body := map[string]string{"provider": "apple", "signedTransaction": "restore-signed-tx"}
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/subscription/restore", body, "tok")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := decodeResp(t, rec)
@@ -550,7 +550,7 @@ func TestRestorePurchases_Google_Valid_ReturnsPro(t *testing.T) {
 	svc := newSvc(repo, &mockAppleVerifier{}).WithGoogle(gClient, "com.beebase.production")
 	router := buildRouter(svc, parser)
 
-	body := map[string]string{"provider": "google", "purchase_token": "restore-google-token"}
+	body := map[string]string{"provider": "google", "purchaseToken": "restore-google-token"}
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/subscription/restore", body, "tok")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := decodeResp(t, rec)
@@ -578,7 +578,7 @@ func TestRestorePurchases_VerificationFailure_Returns400(t *testing.T) {
 	parser := &stubParser{userID: uuid.New()}
 	router := buildRouter(newSvc(newFakeRepo(), verifier), parser)
 
-	body := map[string]string{"provider": "apple", "signed_transaction": "bad"}
+	body := map[string]string{"provider": "apple", "signedTransaction": "bad"}
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/subscription/restore", body, "tok")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
@@ -600,7 +600,7 @@ func TestRestorePurchases_RepeatedIsIdempotent(t *testing.T) {
 	}
 	parser := &stubParser{userID: userID}
 	router := buildRouter(newSvc(repo, verifier), parser)
-	body := map[string]string{"provider": "apple", "signed_transaction": "restore-signed"}
+	body := map[string]string{"provider": "apple", "signedTransaction": "restore-signed"}
 
 	rec1 := doJSON(t, router, http.MethodPost, "/api/v1/subscription/restore", body, "tok")
 	require.Equal(t, http.StatusOK, rec1.Code)
@@ -615,7 +615,7 @@ func TestRestorePurchases_Unauthenticated_Returns401(t *testing.T) {
 	parser := &stubParser{err: authmw.ErrInvalidToken}
 	router := buildRouter(newSvc(newFakeRepo(), &mockAppleVerifier{}), parser)
 
-	body := map[string]string{"provider": "apple", "signed_transaction": "x"}
+	body := map[string]string{"provider": "apple", "signedTransaction": "x"}
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/subscription/restore", body, "tok")
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }

@@ -19,17 +19,17 @@ type SubscriptionResponse struct {
 // SubscriptionDetail carries the raw subscription fields for UI display.
 type SubscriptionDetail struct {
 	ID                    uuid.UUID  `json:"id"`
-	UserID                uuid.UUID  `json:"user_id"`
+	UserID                uuid.UUID  `json:"userId"`
 	Provider              string     `json:"provider"`
-	ProductID             string     `json:"product_id"`
+	ProductID             string     `json:"productId"`
 	Status                string     `json:"status"`
-	OriginalTransactionID *string    `json:"original_transaction_id,omitempty"`
-	TransactionID         *string    `json:"transaction_id,omitempty"`
-	ExpiresAt             *time.Time `json:"expires_at,omitempty"`
-	AutoRenew             *bool      `json:"auto_renew,omitempty"`
-	CancelledAt           *time.Time `json:"cancelled_at,omitempty"`
-	CreatedAt             time.Time  `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
+	OriginalTransactionID *string    `json:"originalTransactionId,omitempty"`
+	TransactionID         *string    `json:"transactionId,omitempty"`
+	ExpiresAt             *time.Time `json:"expiresAt,omitempty"`
+	AutoRenew             *bool      `json:"autoRenew,omitempty"`
+	CancelledAt           *time.Time `json:"cancelledAt,omitempty"`
+	CreatedAt             time.Time  `json:"createdAt"`
+	UpdatedAt             time.Time  `json:"updatedAt"`
 }
 
 func newSubscriptionResponse(result *appsub.VerificationResult) SubscriptionResponse {
