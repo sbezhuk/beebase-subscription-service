@@ -272,36 +272,36 @@ components:
         id:
           type: string
           format: uuid
-        user_id:
+        userId:
           type: string
           format: uuid
         provider:
           type: string
           enum: [apple, google]
           example: "apple"
-        product_id:
+        productId:
           type: string
           example: "beebase_pro_monthly"
         status:
           type: string
           enum: [inactive, active, grace_period, billing_retry, expired, cancelled, revoked]
           example: "active"
-        original_transaction_id:
+        originalTransactionId:
           type: string
-        transaction_id:
+        transactionId:
           type: string
-        expires_at:
+        expiresAt:
           type: string
           format: date-time
-        auto_renew:
+        autoRenew:
           type: boolean
-        cancelled_at:
+        cancelledAt:
           type: string
           format: date-time
-        created_at:
+        createdAt:
           type: string
           format: date-time
-        updated_at:
+        updatedAt:
           type: string
           format: date-time
 
@@ -313,16 +313,16 @@ components:
         provider:
           type: string
           enum: [apple, google]
-        signed_transaction:
+        signedTransaction:
           type: string
           description: Required for Apple. JWS-encoded transaction from StoreKit 2.
-        purchase_token:
+        purchaseToken:
           type: string
           description: Required for Google. Purchase token from Google Play Billing.
-        subscription_id:
+        subscriptionId:
           type: string
           description: Optional Google subscription ID (defaults to beebase_pro).
-        package_name:
+        packageName:
           type: string
           description: Optional Android package name.
 
@@ -334,11 +334,11 @@ components:
         provider:
           type: string
           enum: [apple, google]
-        signed_transaction:
+        signedTransaction:
           type: string
-        purchase_token:
+        purchaseToken:
           type: string
-        subscription_id:
+        subscriptionId:
           type: string
-        package_name:
+        packageName:
           type: string

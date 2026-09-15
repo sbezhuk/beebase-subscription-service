@@ -5,10 +5,10 @@ import "strings"
 // VerifyRequest is the body of POST /api/v1/subscription/verify.
 type VerifyRequest struct {
 	Provider          string `json:"provider"`
-	SignedTransaction string `json:"signed_transaction,omitempty"`
-	PurchaseToken     string `json:"purchase_token,omitempty"`
-	SubscriptionID    string `json:"subscription_id,omitempty"`
-	PackageName       string `json:"package_name,omitempty"`
+	SignedTransaction string `json:"signedTransaction,omitempty"`
+	PurchaseToken     string `json:"purchaseToken,omitempty"`
+	SubscriptionID    string `json:"subscriptionId,omitempty"`
+	PackageName       string `json:"packageName,omitempty"`
 }
 
 // Validate returns a map of field name -> error code.
@@ -26,11 +26,11 @@ func (r *VerifyRequest) Validate() map[string]string {
 	switch provider {
 	case "apple":
 		if strings.TrimSpace(r.SignedTransaction) == "" {
-			fields["signed_transaction"] = "signed_transaction_required"
+			fields["signedTransaction"] = "signed_transaction_required"
 		}
 	case "google":
 		if strings.TrimSpace(r.PurchaseToken) == "" {
-			fields["purchase_token"] = "purchase_token_required"
+			fields["purchaseToken"] = "purchase_token_required"
 		}
 	}
 	return fields
@@ -39,10 +39,10 @@ func (r *VerifyRequest) Validate() map[string]string {
 // RestoreRequest is the body of POST /api/v1/subscription/restore.
 type RestoreRequest struct {
 	Provider          string `json:"provider"`
-	SignedTransaction string `json:"signed_transaction,omitempty"`
-	PurchaseToken     string `json:"purchase_token,omitempty"`
-	SubscriptionID    string `json:"subscription_id,omitempty"`
-	PackageName       string `json:"package_name,omitempty"`
+	SignedTransaction string `json:"signedTransaction,omitempty"`
+	PurchaseToken     string `json:"purchaseToken,omitempty"`
+	SubscriptionID    string `json:"subscriptionId,omitempty"`
+	PackageName       string `json:"packageName,omitempty"`
 }
 
 // Validate returns a map of field name -> error code.
