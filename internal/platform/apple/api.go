@@ -26,6 +26,25 @@ var (
 	ErrAPIEnvironment    = errors.New("apple api environment mismatch")
 )
 
+// APIError contains safe diagnostics from an App Store Server API failure.
+// It deliberately excludes authorization headers, JWTs, JWS values, and
+// transaction identifiers.
+type APIError struct {
+	Category       string
+	Operation      string
+	Endpoint       string
+	HTTPStatus     int
+	AppleErrorCode int
+	AppleMessage   string
+	Err            error
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("%s: %s (status=%d apple_code=%d message=%q endpoint=%s)", e.Category, e.Operation, e.HTTPStatus, e.AppleErrorCode, e.AppleMessage, e.Endpoint)
+}
+
+func (e *APIError) Unwrap() error { return e.Err }
+
 const (
 	EnvironmentProductionBaseURL = "https://api.storekit.apple.com/inApps/v1"
 	EnvironmentSandboxBaseURL    = "https://api.storekit-sandbox.apple.com/inApps/v1"
@@ -123,14 +142,8 @@ func (c *APIClient) GetSubscription(ctx context.Context, transactionID string) (
 		return nil, fmt.Errorf("%w: %v", ErrAPIUnavailable, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("%w: status %d", ErrAPIAuthentication, resp.StatusCode)
-	}
-	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("%w: status %d", ErrAPIUnavailable, resp.StatusCode)
-	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%w: status %d", ErrAPIResponse, resp.StatusCode)
+		return nil, c.apiError(resp)
 	}
 	var result SubscriptionResponse
 	if err := jsonDecoder(resp.Body, &result); err != nil {
@@ -140,6 +153,34 @@ func (c *APIClient) GetSubscription(ctx context.Context, transactionID string) (
 		return nil, ErrAPIMalformed
 	}
 	return &result, nil
+}
+
+type appleErrorResponse struct {
+	ErrorCode    int    `json:"errorCode"`
+	ErrorMessage string `json:"errorMessage"`
+}
+
+func (c *APIClient) apiError(resp *http.Response) error {
+	apiErr := &APIError{
+		Category:   "response",
+		Operation:  "get_subscription",
+		Endpoint:   c.baseURL + "/subscriptions/{anyTransactionId}",
+		HTTPStatus: resp.StatusCode,
+		Err:        ErrAPIResponse,
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		apiErr.Category = "authentication"
+		apiErr.Err = ErrAPIAuthentication
+	} else if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		apiErr.Category = "unavailable"
+		apiErr.Err = ErrAPIUnavailable
+	}
+	var appleErr appleErrorResponse
+	if err := jsonDecoder(resp.Body, &appleErr); err == nil {
+		apiErr.AppleErrorCode = appleErr.ErrorCode
+		apiErr.AppleMessage = appleErr.ErrorMessage
+	}
+	return apiErr
 }
 
 func (c *APIClient) authToken(now time.Time) (string, error) {

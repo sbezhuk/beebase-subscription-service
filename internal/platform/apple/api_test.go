@@ -88,6 +88,7 @@ func TestAPIClientErrors(t *testing.T) {
 		want   error
 	}{
 		{name: "auth", status: http.StatusUnauthorized, want: apple.ErrAPIAuthentication},
+		{name: "apple invalid transaction", status: http.StatusBadRequest, body: `{"errorCode":4000006,"errorMessage":"The transaction id is invalid."}`, want: apple.ErrAPIResponse},
 		{name: "server", status: http.StatusBadGateway, want: apple.ErrAPIUnavailable},
 		{name: "malformed", status: http.StatusOK, body: `{`, want: apple.ErrAPIMalformed},
 	}
@@ -105,6 +106,12 @@ func TestAPIClientErrors(t *testing.T) {
 			_, err = client.GetSubscription(context.Background(), "transaction")
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+			if tc.name == "apple invalid transaction" {
+				var apiErr *apple.APIError
+				if !errors.As(err, &apiErr) || apiErr.AppleErrorCode != 4000006 || apiErr.AppleMessage != "The transaction id is invalid." {
+					t.Fatalf("Apple diagnostics = %+v", apiErr)
+				}
 			}
 		})
 	}

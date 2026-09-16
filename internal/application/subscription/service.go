@@ -750,7 +750,24 @@ func (s *Service) VerifyApplePurchase(ctx context.Context, userID uuid.UUID, sig
 			if errors.Is(reconcileErr, apple.ErrAPIUnavailable) {
 				s.log.Warn("apple api unavailable; retaining locally verified purchase state", "user_id", userID)
 			} else {
-				return nil, fmt.Errorf("%w: apple api reconciliation failed", ErrInvalidWebhookPayload)
+				var apiErr *apple.APIError
+				if errors.As(reconcileErr, &apiErr) {
+					s.log.Error("apple api reconciliation failed",
+						"operation", apiErr.Operation,
+						"endpoint", apiErr.Endpoint,
+						"environment", s.expectedEnv,
+						"http_status", apiErr.HTTPStatus,
+						"apple_error_code", apiErr.AppleErrorCode,
+						"apple_message", apiErr.AppleMessage,
+						"failure_category", apiErr.Category,
+						"authentication_succeeded", apiErr.Category != "authentication",
+						"identifier_kind", "originalTransactionId",
+						"identifier_source", "verified_local_jws",
+					)
+				} else {
+					s.log.Error("apple api reconciliation failed", "failure_category", "local_reconciliation", "error", reconcileErr)
+				}
+				return nil, fmt.Errorf("%w: apple api reconciliation failed: %w", ErrInvalidWebhookPayload, reconcileErr)
 			}
 		} else {
 			txInfo = reconciled.Transaction
