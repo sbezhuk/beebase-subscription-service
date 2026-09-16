@@ -765,7 +765,7 @@ func (s *Service) VerifyApplePurchase(ctx context.Context, userID uuid.UUID, sig
 						"identifier_source", "verified_local_jws",
 					)
 				} else {
-					s.log.Error("apple api reconciliation failed", "failure_category", "local_reconciliation", "error", reconcileErr)
+					s.log.Error("apple api reconciliation failed", "failure_category", "local_reconciliation", "apple_api_http_status", 200, "apple_error_code", 0, "apple_message", "", "error", reconcileErr)
 				}
 				return nil, fmt.Errorf("%w: apple api reconciliation failed: %w", ErrInvalidWebhookPayload, reconcileErr)
 			}
@@ -862,13 +862,28 @@ func (s *Service) reconcileApplePurchase(ctx context.Context, local *apple.Trans
 	}
 	var selected *apple.LastTransaction
 	var selectedTx *apple.TransactionInfo
+	var signedCount, verifyFailures, originalIDMismatches, bundleMismatches, environmentMismatches int
 	for i := range response.LastTransactions {
 		candidate := &response.LastTransactions[i]
 		if candidate.SignedTransactionInfo == "" {
 			continue
 		}
+		signedCount++
 		tx, verifyErr := s.verifier.VerifyTransaction(candidate.SignedTransactionInfo)
-		if verifyErr != nil || tx.OriginalTransactionID != local.OriginalTransactionID || tx.BundleID != s.bundleID || mapEnvironment(tx.Environment) != s.expectedEnv {
+		if verifyErr != nil {
+			verifyFailures++
+			continue
+		}
+		if tx.OriginalTransactionID != local.OriginalTransactionID {
+			originalIDMismatches++
+			continue
+		}
+		if tx.BundleID != s.bundleID {
+			bundleMismatches++
+			continue
+		}
+		if mapEnvironment(tx.Environment) != s.expectedEnv {
+			environmentMismatches++
 			continue
 		}
 		candidateCopy := *candidate
@@ -878,7 +893,7 @@ func (s *Service) reconcileApplePurchase(ctx context.Context, local *apple.Trans
 		}
 	}
 	if selected == nil || selectedTx == nil {
-		return nil, apple.ErrAPIMalformed
+		return nil, fmt.Errorf("%w: reconciliation candidates=%d signed=%d verify_failures=%d original_id_mismatches=%d bundle_mismatches=%d environment_mismatches=%d", apple.ErrAPIMalformed, len(response.LastTransactions), signedCount, verifyFailures, originalIDMismatches, bundleMismatches, environmentMismatches)
 	}
 	statusCode := response.Status
 	if selected.Status > 0 {
