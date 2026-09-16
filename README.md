@@ -37,9 +37,9 @@ and `/api/v1/subscriptions/webhooks/*` — see its docker-compose for the full s
 
 ```bash
 cp .env.example .env
-# point AUTH_JWKS_URL at a running auth-service, e.g.
+#  point AUTH_JWKS_URL at a running auth-service, e.g.
 #   http://localhost:8081/.well-known/jwks.json
-# point REDIS_ADDR at a running Redis instance, e.g.
+#  point REDIS_ADDR at a running Redis instance, e.g.
 #   localhost:6379
 
 # Option A: run Postgres in Docker, app on the host
