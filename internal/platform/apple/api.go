@@ -81,11 +81,15 @@ type SubscriptionAPI interface {
 }
 
 type SubscriptionResponse struct {
-	Environment      string            `json:"environment"`
-	AppAppleID       int64             `json:"appAppleId"`
-	BundleID         string            `json:"bundleId"`
-	Status           int               `json:"status"`
-	LastTransactions []LastTransaction `json:"lastTransactions"`
+	Environment string             `json:"environment"`
+	AppAppleID  int64              `json:"appAppleId"`
+	BundleID    string             `json:"bundleId"`
+	Data        []SubscriptionData `json:"data"`
+}
+
+type SubscriptionData struct {
+	SubscriptionGroupIdentifier string            `json:"subscriptionGroupIdentifier"`
+	LastTransactions            []LastTransaction `json:"lastTransactions"`
 }
 
 type LastTransaction struct {
@@ -149,7 +153,7 @@ func (c *APIClient) GetSubscription(ctx context.Context, transactionID string) (
 	if err := jsonDecoder(resp.Body, &result); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrAPIMalformed, err)
 	}
-	if result.Status < 1 || result.Status > 5 || len(result.LastTransactions) == 0 {
+	if len(result.Data) == 0 {
 		return nil, ErrAPIMalformed
 	}
 	return &result, nil

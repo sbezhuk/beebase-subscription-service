@@ -57,14 +57,18 @@ func TestNewAPIClientAndJWTClaims(t *testing.T) {
 			if r.Header.Get("Authorization") == "" || r.URL.Host != "api.storekit-sandbox.apple.com" {
 				t.Fatalf("request did not use sandbox API")
 			}
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"environment":"Sandbox","status":1,"lastTransactions":[{"status":1,"signedTransactionInfo":"signed"}]}`)), Header: make(http.Header)}, nil
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"environment":"Sandbox","data":[{"subscriptionGroupIdentifier":"group","lastTransactions":[{"status":1,"signedTransactionInfo":"signed"}]}]}`)), Header: make(http.Header)}, nil
 		})},
 	})
 	if err != nil {
 		t.Fatalf("NewAPIClient: %v", err)
 	}
-	if _, err := client.GetSubscription(context.Background(), "orig/transaction"); err != nil {
+	result, err := client.GetSubscription(context.Background(), "orig/transaction")
+	if err != nil {
 		t.Fatalf("GetSubscription: %v", err)
+	}
+	if len(result.Data) != 1 || len(result.Data[0].LastTransactions) != 1 {
+		t.Fatalf("nested subscription data was not decoded: %+v", result)
 	}
 	if !strings.Contains(gotURL, "/subscriptions/orig%2Ftransaction") {
 		t.Fatalf("transaction ID was not escaped in URL: %s", gotURL)
@@ -139,7 +143,7 @@ func TestAppleAPIClientUsesProductionByDefault(t *testing.T) {
 		KeyID: "k", IssuerID: "i", BundleID: "b", PrivateKey: testPrivateKey(t),
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			gotURL = r.URL.String()
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"status":1,"lastTransactions":[{"signedTransactionInfo":"signed"}]}`)), Header: make(http.Header)}, nil
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":[{"lastTransactions":[{"status":1,"signedTransactionInfo":"signed"}]}]}`)), Header: make(http.Header)}, nil
 		})},
 	})
 	if err != nil {

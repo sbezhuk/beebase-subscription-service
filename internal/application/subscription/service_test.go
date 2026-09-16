@@ -228,7 +228,7 @@ func TestVerifyApplePurchase_ReconcilesAuthoritativeAPIState(t *testing.T) {
 		return local, nil
 	}}
 	svc := appsub.NewService(repo, verifier, local.BundleID, subscription.EnvironmentProduction, testLogger()).WithAppleAPI(&mockAppleAPI{
-		response: &apple.SubscriptionResponse{Status: 2, LastTransactions: []apple.LastTransaction{{Status: 2, SignedTransactionInfo: "api-signed"}}},
+		response: &apple.SubscriptionResponse{Data: []apple.SubscriptionData{{LastTransactions: []apple.LastTransaction{{Status: 2, SignedTransactionInfo: "api-signed"}}}}},
 	})
 	result, err := svc.VerifyApplePurchase(context.Background(), userID, "local-signed")
 	if err != nil {
