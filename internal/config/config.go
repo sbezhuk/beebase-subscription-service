@@ -37,8 +37,9 @@ type Config struct {
 	// AuthJWKSURL points at auth-service's JWKS endpoint for token verification.
 	AuthJWKSURL string
 	// RedisAddr is the shared session store for token revocation.
-	RedisAddr           string
-	RedisConnectTimeout time.Duration
+	RedisAddr            string
+	RedisConnectTimeout  time.Duration
+	InternalServiceToken string
 }
 
 // Load builds a Config from environment variables, falling back to
@@ -78,9 +79,10 @@ func Load() (*Config, error) {
 		GoogleServiceAccountJSON: getEnv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
 		GooglePackageName:        getEnv("GOOGLE_PACKAGE_NAME", "com.beebase.production"),
 
-		AuthJWKSURL:         getEnv("AUTH_JWKS_URL", ""),
-		RedisAddr:           getEnv("REDIS_ADDR", ""),
-		RedisConnectTimeout: getDuration("REDIS_CONNECT_TIMEOUT", 5*time.Second),
+		AuthJWKSURL:          getEnv("AUTH_JWKS_URL", ""),
+		RedisAddr:            getEnv("REDIS_ADDR", ""),
+		RedisConnectTimeout:  getDuration("REDIS_CONNECT_TIMEOUT", 5*time.Second),
+		InternalServiceToken: getEnv("INTERNAL_SERVICE_TOKEN", ""),
 	}
 
 	if cfg.DatabaseURL == "" {

@@ -101,7 +101,7 @@ func run() error {
 
 	subscriptionHandler := subhttp.NewHandler(appService, log)
 
-	router := transporthttp.NewRouter(log, db, subscriptionHandler, appleHandler, googleHandler, verifier)
+	router := transporthttp.NewRouter(log, db, subscriptionHandler, appleHandler, googleHandler, verifier, cfg.InternalServiceToken)
 
 	srv := server.New(server.Config{
 		Addr:         ":" + cfg.HTTPPort,

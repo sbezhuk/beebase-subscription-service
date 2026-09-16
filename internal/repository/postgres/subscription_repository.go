@@ -17,6 +17,13 @@ type SubscriptionRepository struct {
 	db Querier
 }
 
+// DeleteAllByUser removes the local account-owned entitlement. Provider
+// records remain with Apple/Google and are intentionally not mutated here.
+func (r *SubscriptionRepository) DeleteAllByUser(ctx context.Context, userID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM subscriptions WHERE user_id = $1`, userID)
+	return err
+}
+
 // NewSubscriptionRepository returns a SubscriptionRepository backed by db.
 func NewSubscriptionRepository(db Querier) *SubscriptionRepository {
 	return &SubscriptionRepository{db: db}

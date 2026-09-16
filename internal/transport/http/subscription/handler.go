@@ -3,6 +3,7 @@
 package subscription
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -27,6 +28,10 @@ const (
 type Handler struct {
 	service *appsub.Service
 	log     *slog.Logger
+}
+
+func (h *Handler) DeleteUserData(ctx context.Context, userID uuid.UUID) error {
+	return h.service.DeleteAllByUser(ctx, userID)
 }
 
 // NewHandler returns a Handler backed by service.

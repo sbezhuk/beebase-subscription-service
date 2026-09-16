@@ -8,9 +8,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sbezhuk/beebase-common/authmw"
+	"github.com/sbezhuk/beebase-common/httpx"
+	"github.com/sbezhuk/beebase-common/internalauth"
 	subhttp "github.com/sbezhuk/beebase-subscription-service/internal/transport/http/subscription"
 )
 
@@ -22,7 +25,12 @@ func NewRouter(
 	appleWebhookHandler http.Handler,
 	googleWebhookHandler http.Handler,
 	tokenParser authmw.AccessTokenParser,
+	internalTokens ...string,
 ) http.Handler {
+	internalToken := ""
+	if len(internalTokens) > 0 {
+		internalToken = internalTokens[0]
+	}
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -50,6 +58,18 @@ func NewRouter(
 		r.Method(http.MethodPost, "/api/v1/subscriptions/webhooks/google", googleWebhookHandler)
 		r.Method(http.MethodPost, "/api/v1/subscription/webhooks/google", googleWebhookHandler)
 	}
+	r.With(internalauth.RequireAuth(internalToken)).Delete("/internal/api/v1/users/{userID}", func(w http.ResponseWriter, req *http.Request) {
+		id, err := uuid.Parse(chi.URLParam(req, "userID"))
+		if err != nil {
+			httpx.WriteError(w, 400, "invalid_user_id", "invalid user id")
+			return
+		}
+		if err := subscriptionHandler.DeleteUserData(req.Context(), id); err != nil {
+			httpx.WriteError(w, 500, "cleanup_failed", "could not delete subscription data")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	return r
 }

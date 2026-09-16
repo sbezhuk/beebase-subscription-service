@@ -63,6 +63,19 @@ func (s *Service) WithGoogle(client google.Client, packageName string) *Service 
 	return s
 }
 
+// DeleteAllByUser removes only BeeBase's local subscription projection. The
+// App Store/Play purchase remains provider-owned; future webhooks are ignored
+// because no local account mapping exists after this operation.
+func (s *Service) DeleteAllByUser(ctx context.Context, userID uuid.UUID) error {
+	r, ok := s.repo.(interface {
+		DeleteAllByUser(context.Context, uuid.UUID) error
+	})
+	if !ok {
+		return fmt.Errorf("subscription repository does not support account cleanup")
+	}
+	return r.DeleteAllByUser(ctx, userID)
+}
+
 // HandleAppleNotification processes an incoming App Store Server Notifications V2 payload.
 func (s *Service) HandleAppleNotification(ctx context.Context, signedPayload string) error {
 	if signedPayload == "" {
