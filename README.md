@@ -159,7 +159,9 @@ Entitlement is calculated dynamically via `HasActiveAccess()`: a subscription is
    - The iOS client sends a `signed_transaction` JWS string obtained from StoreKit 2.
    - The server cryptographically validates the JWS certificate chain against Apple Root CA certificates.
    - Validates that the bundle ID matches `APPLE_BUNDLE_ID` and the transaction environment matches `APPLE_ENVIRONMENT`.
-   - Records or updates the user's subscription record with the transaction details and expiration timestamp.
+   - Uses the trusted `originalTransactionId` to reconcile with Apple's App Store Server API using a short-lived ES256 JWT signed by `APPLE_PRIVATE_KEY`.
+   - Verifies the API response's signed transaction data with Apple's public certificate chain, then records the authoritative subscription state.
+   - If Apple is temporarily unavailable, the locally verified transaction is retained; authentication, environment, and malformed-response failures are rejected.
 
 2. **Google Play Billing (`POST /api/v1/subscription/verify`)**:
    - The Android client sends a `purchase_token` and `subscription_id`.

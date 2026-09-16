@@ -94,6 +94,11 @@ func Load() (*Config, error) {
 	if cfg.RedisAddr == "" {
 		return nil, fmt.Errorf("config: REDIS_ADDR is required")
 	}
+	if env == "production" {
+		if cfg.AppleKeyID == "" || cfg.AppleIssuerID == "" || cfg.ApplePrivateKey == "" {
+			return nil, fmt.Errorf("config: APPLE_KEY_ID, APPLE_ISSUER_ID, and APPLE_PRIVATE_KEY are required in production")
+		}
+	}
 
 	return cfg, nil
 }

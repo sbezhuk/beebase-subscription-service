@@ -43,6 +43,7 @@ type Service struct {
 
 	googleClient      google.Client
 	googlePackageName string
+	appleAPI          apple.SubscriptionAPI
 }
 
 // NewService constructs a Service with the provided repository, verifier, and configuration.
@@ -60,6 +61,14 @@ func NewService(repo subscription.Repository, verifier apple.Verifier, bundleID 
 func (s *Service) WithGoogle(client google.Client, packageName string) *Service {
 	s.googleClient = client
 	s.googlePackageName = packageName
+	return s
+}
+
+// WithAppleAPI enables authoritative App Store Server API reconciliation after
+// local StoreKit JWS verification. A nil client preserves local-only behavior
+// for isolated unit tests and development configurations.
+func (s *Service) WithAppleAPI(client apple.SubscriptionAPI) *Service {
+	s.appleAPI = client
 	return s
 }
 
@@ -733,6 +742,23 @@ func (s *Service) VerifyApplePurchase(ctx context.Context, userID uuid.UUID, sig
 		return nil, fmt.Errorf("%w: unsupported product %s", ErrUnsupportedProduct, txInfo.ProductID)
 	}
 
+	authoritativeStatus := subscription.StatusActive
+	autoRenew := true
+	if s.appleAPI != nil {
+		reconciled, reconcileErr := s.reconcileApplePurchase(ctx, txInfo)
+		if reconcileErr != nil {
+			if errors.Is(reconcileErr, apple.ErrAPIUnavailable) {
+				s.log.Warn("apple api unavailable; retaining locally verified purchase state", "user_id", userID)
+			} else {
+				return nil, fmt.Errorf("%w: apple api reconciliation failed", ErrInvalidWebhookPayload)
+			}
+		} else {
+			txInfo = reconciled.Transaction
+			authoritativeStatus = reconciled.Status
+			autoRenew = reconciled.AutoRenew
+		}
+	}
+
 	var result *VerificationResult
 	err = s.repo.WithTx(ctx, func(txRepo subscription.Repository) error {
 		existing, lookupErr := txRepo.FindByProviderAndTransaction(ctx, subscription.ProviderApple, txInfo.OriginalTransactionID)
@@ -748,19 +774,19 @@ func (s *Service) VerifyApplePurchase(ctx context.Context, userID uuid.UUID, sig
 			t := time.UnixMilli(txInfo.ExpiresDate).UTC()
 			incomingExpiresAt = &t
 		}
-		autoRenew := true
-
 		var sub *subscription.Subscription
 		if existing != nil {
 			existing.UserID = userID
 			existing.ProductID = txInfo.ProductID
 			existing.TransactionID = &txInfo.TransactionID
 			existing.OriginalTransactionID = &txInfo.OriginalTransactionID
-			existing.Status = subscription.StatusActive
+			existing.Status = authoritativeStatus
 			existing.Environment = &env
 			existing.ExpiresAt = incomingExpiresAt
 			existing.AutoRenew = &autoRenew
-			existing.CancelledAt = nil
+			if authoritativeStatus == subscription.StatusActive || authoritativeStatus == subscription.StatusGracePeriod {
+				existing.CancelledAt = nil
+			}
 			existing.UpdatedAt = now
 			if err := txRepo.Upsert(ctx, existing); err != nil {
 				return fmt.Errorf("upsert subscription: %w", err)
@@ -773,7 +799,7 @@ func (s *Service) VerifyApplePurchase(ctx context.Context, userID uuid.UUID, sig
 			}
 			newSub.OriginalTransactionID = &txInfo.OriginalTransactionID
 			newSub.TransactionID = &txInfo.TransactionID
-			newSub.Status = subscription.StatusActive
+			newSub.Status = authoritativeStatus
 			newSub.Environment = &env
 			newSub.ExpiresAt = incomingExpiresAt
 			newSub.AutoRenew = &autoRenew
@@ -801,6 +827,76 @@ func (s *Service) VerifyApplePurchase(ctx context.Context, userID uuid.UUID, sig
 		return nil, err
 	}
 	return result, nil
+}
+
+type reconciledApplePurchase struct {
+	Transaction *apple.TransactionInfo
+	Status      subscription.Status
+	AutoRenew   bool
+}
+
+func (s *Service) reconcileApplePurchase(ctx context.Context, local *apple.TransactionInfo) (*reconciledApplePurchase, error) {
+	response, err := s.appleAPI.GetSubscription(ctx, local.OriginalTransactionID)
+	if err != nil {
+		return nil, err
+	}
+	if response.Environment != "" && mapEnvironment(response.Environment) != s.expectedEnv {
+		return nil, apple.ErrAPIEnvironment
+	}
+	var selected *apple.LastTransaction
+	var selectedTx *apple.TransactionInfo
+	for i := range response.LastTransactions {
+		candidate := &response.LastTransactions[i]
+		if candidate.SignedTransactionInfo == "" {
+			continue
+		}
+		tx, verifyErr := s.verifier.VerifyTransaction(candidate.SignedTransactionInfo)
+		if verifyErr != nil || tx.OriginalTransactionID != local.OriginalTransactionID || tx.BundleID != s.bundleID || mapEnvironment(tx.Environment) != s.expectedEnv {
+			continue
+		}
+		candidateCopy := *candidate
+		if selectedTx == nil || tx.SignedDate > selectedTx.SignedDate {
+			selected = &candidateCopy
+			selectedTx = tx
+		}
+	}
+	if selected == nil || selectedTx == nil {
+		return nil, apple.ErrAPIMalformed
+	}
+	statusCode := response.Status
+	if selected.Status > 0 {
+		statusCode = selected.Status
+	}
+	status, ok := mapAppleAPIStatus(statusCode)
+	if !ok {
+		return nil, apple.ErrAPIMalformed
+	}
+	autoRenew := status == subscription.StatusActive || status == subscription.StatusGracePeriod
+	if selected.SignedRenewalInfo != "" {
+		renewal, verifyErr := s.verifier.VerifyRenewalInfo(selected.SignedRenewalInfo)
+		if verifyErr != nil {
+			return nil, apple.ErrAPIMalformed
+		}
+		autoRenew = renewal.AutoRenewStatus == 1
+	}
+	return &reconciledApplePurchase{Transaction: selectedTx, Status: status, AutoRenew: autoRenew}, nil
+}
+
+func mapAppleAPIStatus(status int) (subscription.Status, bool) {
+	switch status {
+	case 1:
+		return subscription.StatusActive, true
+	case 2:
+		return subscription.StatusExpired, true
+	case 3:
+		return subscription.StatusBillingRetry, true
+	case 4:
+		return subscription.StatusGracePeriod, true
+	case 5:
+		return subscription.StatusRevoked, true
+	default:
+		return "", false
+	}
 }
 
 // VerifyGooglePurchase verifies a newly completed Google Play purchase for

@@ -85,6 +85,16 @@ func run() error {
 		expectedEnv = subscription.EnvironmentSandbox
 	}
 	appService := appsub.NewService(repo, appleVerifier, cfg.AppleBundleID, expectedEnv, log)
+	if cfg.AppleKeyID != "" || cfg.AppleIssuerID != "" || cfg.ApplePrivateKey != "" {
+		appleAPI, apiErr := apple.NewAPIClient(apple.APIConfig{
+			KeyID: cfg.AppleKeyID, IssuerID: cfg.AppleIssuerID, BundleID: cfg.AppleBundleID,
+			PrivateKey: cfg.ApplePrivateKey, Environment: cfg.AppleEnvironment,
+		})
+		if apiErr != nil {
+			return fmt.Errorf("initialize apple api client: %w", apiErr)
+		}
+		appService.WithAppleAPI(appleAPI)
+	}
 	appleHandler := webhookhttp.NewAppleHandler(appService, log)
 
 	var googleHandler *webhookhttp.GoogleHandler

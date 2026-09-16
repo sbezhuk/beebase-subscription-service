@@ -177,6 +177,15 @@ type mockVerifier struct {
 	renewalFn      func(signedRenewalInfo string) (*apple.RenewalInfo, error)
 }
 
+type mockAppleAPI struct {
+	response *apple.SubscriptionResponse
+	err      error
+}
+
+func (m *mockAppleAPI) GetSubscription(context.Context, string) (*apple.SubscriptionResponse, error) {
+	return m.response, m.err
+}
+
 func (m *mockVerifier) VerifyNotification(signedPayload string) (*apple.NotificationPayload, error) {
 	if m.notificationFn != nil {
 		return m.notificationFn(signedPayload)
@@ -200,6 +209,54 @@ func (m *mockVerifier) VerifyRenewalInfo(signedRenewalInfo string) (*apple.Renew
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestVerifyApplePurchase_ReconcilesAuthoritativeAPIState(t *testing.T) {
+	repo := newFakeRepo()
+	userID := uuid.New()
+	local := &apple.TransactionInfo{
+		OriginalTransactionID: "orig-1", TransactionID: "local-tx", BundleID: "com.beebase.production",
+		ProductID: appsub.ProductProMonthly, Environment: "Production", ExpiresDate: time.Now().Add(24 * time.Hour).UnixMilli(),
+	}
+	authoritative := *local
+	authoritative.TransactionID = "api-tx"
+	authoritative.ExpiresDate = time.Now().Add(-time.Hour).UnixMilli()
+	verifier := &mockVerifier{transactionFn: func(signed string) (*apple.TransactionInfo, error) {
+		if signed == "api-signed" {
+			return &authoritative, nil
+		}
+		return local, nil
+	}}
+	svc := appsub.NewService(repo, verifier, local.BundleID, subscription.EnvironmentProduction, testLogger()).WithAppleAPI(&mockAppleAPI{
+		response: &apple.SubscriptionResponse{Status: 2, LastTransactions: []apple.LastTransaction{{Status: 2, SignedTransactionInfo: "api-signed"}}},
+	})
+	result, err := svc.VerifyApplePurchase(context.Background(), userID, "local-signed")
+	if err != nil {
+		t.Fatalf("VerifyApplePurchase: %v", err)
+	}
+	if result.Subscription.Status != subscription.StatusExpired {
+		t.Fatalf("status = %s, want expired", result.Subscription.Status)
+	}
+	if *result.Subscription.TransactionID != "api-tx" {
+		t.Fatalf("transaction ID = %s, want api-tx", *result.Subscription.TransactionID)
+	}
+}
+
+func TestVerifyApplePurchase_APIUnavailableKeepsLocalVerification(t *testing.T) {
+	repo := newFakeRepo()
+	userID := uuid.New()
+	local := &apple.TransactionInfo{
+		OriginalTransactionID: "orig-2", TransactionID: "local-tx", BundleID: "com.beebase.production",
+		ProductID: appsub.ProductProMonthly, Environment: "Production", ExpiresDate: time.Now().Add(24 * time.Hour).UnixMilli(),
+	}
+	svc := appsub.NewService(repo, &mockVerifier{transactionFn: func(string) (*apple.TransactionInfo, error) { return local, nil }}, local.BundleID, subscription.EnvironmentProduction, testLogger()).WithAppleAPI(&mockAppleAPI{err: apple.ErrAPIUnavailable})
+	result, err := svc.VerifyApplePurchase(context.Background(), userID, "local-signed")
+	if err != nil {
+		t.Fatalf("VerifyApplePurchase: %v", err)
+	}
+	if result.Subscription.Status != subscription.StatusActive {
+		t.Fatalf("status = %s, want active fallback", result.Subscription.Status)
+	}
 }
 
 func TestHandleAppleNotification_Mapping(t *testing.T) {
