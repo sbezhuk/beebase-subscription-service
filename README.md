@@ -9,8 +9,7 @@ for the architectural rules this service follows.
 Register/login/refresh live in `beebase-auth-service` — this service manages
 user subscriptions, verifies in-app purchase receipts (Apple App Store StoreKit 2
 and Google Play Billing), resolves user entitlement status (`free` vs `pro`),
-and processes asynchronous store lifecycle notifications (Apple App Store Server
-Notifications V2 and Google Play RTDN via Google Cloud Pub/Sub). It never
+and validates current store state on demand. It never
 trusts a user ID from anywhere but a JWKS-verified access token, and never
 trusts a purchase claim without server-side cryptographic store verification.
 
@@ -18,8 +17,9 @@ Related services: `beebase-auth-service` (users, refresh tokens, JWT issuing,
 public key JWKS, session revocation via Redis), `beebase-gateway` (single entry
 point for clients).
 
-This service is reachable through `beebase-gateway` at `/api/v1/subscription`
-and `/api/v1/subscriptions/webhooks/*` — see its docker-compose for the full stack.
+This service is reachable through `beebase-gateway` at `/api/v1/subscription`.
+There are currently no public Apple or Google webhook routes in the HTTP
+router; entitlement changes are reconciled through verify/restore requests.
 
 ## Requirements
 
@@ -126,7 +126,7 @@ api/openapi.yaml                  API contract
 migrations/                       SQL migrations (golang-migrate format)
 internal/
   domain/subscription/            Subscription entity, lifecycle Status state machine, Repository + Event ports; no infrastructure dependency
-  application/subscription/       use cases: GetSubscription, VerifyPurchase, RestorePurchases, HandleAppleNotification, HandleGoogleNotification
+  application/subscription/       use cases: GetSubscription, VerifyPurchase, RestorePurchases
   platform/
     apple/                        StoreKit 2 JWS receipt & notification verifier, Apple root CA chain validation
     google/                       Google Play Developer API client (AndroidPublisher)
@@ -134,7 +134,6 @@ internal/
   repository/postgres/            domain repository & idempotency event store implemented against PostgreSQL (pgx, explicit SQL)
   transport/http/                 chi router, health/ready handlers, request logging
     subscription/                 authenticated subscription HTTP handlers (/api/v1/subscription)
-    webhook/                      Apple and Google store webhook handlers (/api/v1/subscriptions/webhooks/*)
 ```
 
 logger, JSON response/error helpers, the graceful-shutdown server wrapper,
@@ -171,14 +170,12 @@ Entitlement is calculated dynamically via `HasActiveAccess()`: a subscription is
 3. **Restore Purchases (`POST /api/v1/subscription/restore`)**:
    - Allows users to re-link an existing StoreKit 2 or Google Play purchase to their BeeBase account upon reinstallation or device transfer.
 
-### Webhooks and Idempotency
+### Reconciliation
 
-Asynchronous store events are handled at:
-
-- `POST /api/v1/subscriptions/webhooks/apple`: Receives App Store Server Notifications V2 JWS payloads (e.g., renewals, cancellations, expired, revoked, grace period).
-- `POST /api/v1/subscriptions/webhooks/google`: Receives Google Cloud Pub/Sub push messages containing Google Play Real-Time Developer Notifications (RTDN).
-
-Every incoming webhook event is recorded in the `subscription_events` table using its unique notification identifier (`notificationUUID` for Apple, `messageId` for Google). If an event identifier has already been processed, the handler acknowledges the event and skips duplicate mutation, ensuring idempotent processing even during network retries.
+The currently exposed API is request-driven: authenticated verify and restore
+calls validate the submitted purchase with Apple or Google and persist the
+authoritative subscription state. Store webhook/RTDN delivery is not exposed
+by the current HTTP router.
 
 ## Ownership
 
