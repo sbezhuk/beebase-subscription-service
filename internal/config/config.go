@@ -5,7 +5,10 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Config holds all runtime configuration for the subscription-service.
@@ -40,6 +43,13 @@ type Config struct {
 	RedisAddr            string
 	RedisConnectTimeout  time.Duration
 	InternalServiceToken string
+
+	// ProEntitlementAllowlist grants effective Pro entitlement to these
+	// user IDs regardless of their real subscription state - see
+	// application/subscription.Service.WithProEntitlementAllowlist. Empty
+	// (the default, when PRO_ENTITLEMENT_ALLOWLIST is unset or blank)
+	// leaves entitlement decisions completely unaffected.
+	ProEntitlementAllowlist []uuid.UUID
 }
 
 // Load builds a Config from environment variables, falling back to
@@ -54,6 +64,11 @@ func Load() (*Config, error) {
 		} else {
 			appleEnv = "Sandbox"
 		}
+	}
+
+	proAllowlist, err := parseUUIDAllowlist("PRO_ENTITLEMENT_ALLOWLIST")
+	if err != nil {
+		return nil, err
 	}
 
 	cfg := &Config{
@@ -83,6 +98,8 @@ func Load() (*Config, error) {
 		RedisAddr:            getEnv("REDIS_ADDR", ""),
 		RedisConnectTimeout:  getDuration("REDIS_CONNECT_TIMEOUT", 5*time.Second),
 		InternalServiceToken: getEnv("INTERNAL_SERVICE_TOKEN", ""),
+
+		ProEntitlementAllowlist: proAllowlist,
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -120,4 +137,41 @@ func getDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// parseUUIDAllowlist parses key as a comma-separated list of user IDs,
+// trimming whitespace around each entry, skipping empty entries (e.g. a
+// trailing comma), and deduplicating repeated IDs while preserving
+// first-occurrence order. Unset or blank (after trimming) returns a nil,
+// error-free allowlist, so the feature is fully inert unless explicitly
+// configured.
+//
+// Fails fast: any non-empty entry that isn't a well-formed UUID is a
+// configuration error, not something to silently drop - a typo here must
+// never quietly narrow (or, if the typo happened to collide, widen) who
+// receives effective Pro access. The error names key and the single
+// offending entry only, never the full configured list.
+func parseUUIDAllowlist(key string) ([]uuid.UUID, error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	seen := make(map[uuid.UUID]struct{})
+	var ids []uuid.UUID
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := uuid.Parse(part)
+		if err != nil {
+			return nil, fmt.Errorf("config: %s contains an invalid user id %q", key, part)
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
