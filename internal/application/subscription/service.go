@@ -44,6 +44,14 @@ type Service struct {
 	googleClient      google.Client
 	googlePackageName string
 	appleAPI          apple.SubscriptionAPI
+
+	// proEntitlementAllowlist grants effective Pro entitlement to specific
+	// user IDs regardless of their real subscription state - see
+	// entitlementFor and WithProEntitlementAllowlist. nil (the default,
+	// when WithProEntitlementAllowlist is never called) makes every
+	// entitlementFor decision depend solely on the real subscription
+	// record, identical to behavior before this allowlist existed.
+	proEntitlementAllowlist map[uuid.UUID]struct{}
 }
 
 // NewService constructs a Service with the provided repository, verifier, and configuration.
@@ -61,6 +69,30 @@ func NewService(repo subscription.Repository, verifier apple.Verifier, bundleID 
 func (s *Service) WithGoogle(client google.Client, packageName string) *Service {
 	s.googleClient = client
 	s.googlePackageName = packageName
+	return s
+}
+
+// WithProEntitlementAllowlist grants effective Pro entitlement to userIDs
+// regardless of their real subscription state - see entitlementFor. It is
+// strictly additive: a user already entitled to Pro through a real
+// subscription is returned exactly as before (the allowlist is never even
+// consulted for them), and it never touches authentication, ownership,
+// session validation, purchase/receipt verification, persisted
+// subscription records, or deletion.
+//
+// Passing nil or an empty slice - including never calling this at all, the
+// default - leaves proEntitlementAllowlist nil, so entitlementFor's
+// allowlist branch can never match and every decision is identical to
+// behavior before this allowlist existed.
+func (s *Service) WithProEntitlementAllowlist(userIDs []uuid.UUID) *Service {
+	if len(userIDs) == 0 {
+		return s
+	}
+	allow := make(map[uuid.UUID]struct{}, len(userIDs))
+	for _, id := range userIDs {
+		allow[id] = struct{}{}
+	}
+	s.proEntitlementAllowlist = allow
 	return s
 }
 
@@ -682,10 +714,16 @@ type VerificationResult struct {
 	Entitlement  string // EntitlementFree or EntitlementPro
 }
 
-// entitlementFor returns the entitlement string for sub.
-// Uses HasActiveAccess as the authoritative source.
-func entitlementFor(sub *subscription.Subscription) string {
+// entitlementFor returns the entitlement string for userID's sub.
+// HasActiveAccess remains the authoritative source for real Pro access,
+// checked first and returned immediately when true - the allowlist is
+// consulted only as a fallback, for a userID that would otherwise be
+// Free, never overriding or short-circuiting a real subscription.
+func (s *Service) entitlementFor(userID uuid.UUID, sub *subscription.Subscription) string {
 	if sub != nil && sub.HasActiveAccess(time.Now().UTC()) {
+		return EntitlementPro
+	}
+	if _, allowed := s.proEntitlementAllowlist[userID]; allowed {
 		return EntitlementPro
 	}
 	return EntitlementFree
@@ -698,13 +736,13 @@ func (s *Service) GetSubscription(ctx context.Context, userID uuid.UUID) (*Verif
 	sub, err := s.repo.FindByUserID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, subscription.ErrNotFound) {
-			return &VerificationResult{Entitlement: EntitlementFree}, nil
+			return &VerificationResult{Entitlement: s.entitlementFor(userID, nil)}, nil
 		}
 		return nil, fmt.Errorf("get subscription: %w", err)
 	}
 	return &VerificationResult{
 		Subscription: sub,
-		Entitlement:  entitlementFor(sub),
+		Entitlement:  s.entitlementFor(userID, sub),
 	}, nil
 }
 
@@ -836,7 +874,7 @@ func (s *Service) VerifyApplePurchase(ctx context.Context, userID uuid.UUID, sig
 
 		result = &VerificationResult{
 			Subscription: sub,
-			Entitlement:  entitlementFor(sub),
+			Entitlement:  s.entitlementFor(userID, sub),
 		}
 		return nil
 	})
@@ -1028,7 +1066,7 @@ func (s *Service) VerifyGooglePurchase(ctx context.Context, userID uuid.UUID, pu
 
 		result = &VerificationResult{
 			Subscription: sub,
-			Entitlement:  entitlementFor(sub),
+			Entitlement:  s.entitlementFor(userID, sub),
 		}
 		return nil
 	})

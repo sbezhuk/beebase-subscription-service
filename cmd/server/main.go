@@ -85,6 +85,7 @@ func run() error {
 		expectedEnv = subscription.EnvironmentSandbox
 	}
 	appService := appsub.NewService(repo, appleVerifier, cfg.AppleBundleID, expectedEnv, log)
+	appService.WithProEntitlementAllowlist(cfg.ProEntitlementAllowlist)
 	if cfg.AppleKeyID != "" || cfg.AppleIssuerID != "" || cfg.ApplePrivateKey != "" {
 		appleAPI, apiErr := apple.NewAPIClient(apple.APIConfig{
 			KeyID: cfg.AppleKeyID, IssuerID: cfg.AppleIssuerID, BundleID: cfg.AppleBundleID,
